@@ -338,7 +338,7 @@ int main(int argc, char **argv)
 	char ip[30];
 #ifndef WIN32
 	struct sigaction sa;
-	// struct winsize w;
+	struct winsize w;
 #endif
 	struct timeval tv;
 	unsigned long oldus = 0;
@@ -420,10 +420,10 @@ int main(int argc, char **argv)
 	}
 
 #ifndef WIN32
-	// if (isatty(STDOUT_FILENO))
-	// 	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) != -1)
-	// 		if (w.ws_col > 0)
-	// 			screen_width = w.ws_col;
+	if (isatty(STDOUT_FILENO))
+		if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) != -1)
+			if (w.ws_col > 0)
+				screen_width = w.ws_col;
 #endif
 
 	info.port = CONTEXT_PORT_NO_LISTEN;
