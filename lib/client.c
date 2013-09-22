@@ -45,6 +45,22 @@ int lws_client_socket_service(struct libwebsocket_context *context,
 
 	switch (wsi->mode) {
 
+	case LWS_CONNMODE_WS_CLIENT_WAITING_CONNECT:
+
+		/*
+		 * we are under PENDING_TIMEOUT_SENT_CLIENT_HANDSHAKE
+		 * timeout protection set in client-handshake.c
+		 */
+
+		if (__libwebsocket_client_connect_2(context, wsi) == NULL) {
+			/* closed */
+			lwsl_client("closed\n");
+			return -1;
+		}
+
+		/* either still pending connection, or changed mode */
+		return 0;
+
 	case LWS_CONNMODE_WS_CLIENT_WAITING_PROXY_REPLY:
 
 		/* handle proxy hung up on us */
@@ -333,7 +349,7 @@ bail3:
 			"closing connection at LWS_CONNMODE...SERVER_REPLY\n");
 		libwebsocket_close_and_free_session(context, wsi,
 						    LWS_CLOSE_STATUS_NOSTATUS);
-		return 0;
+		return -1;
 
 	case LWS_CONNMODE_WS_CLIENT_WAITING_EXTENSION_CONNECT:
 		lwsl_ext("LWS_CONNMODE_WS_CLIENT_WAITING_EXTENSION_CONNECT\n");

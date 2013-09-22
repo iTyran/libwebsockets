@@ -221,6 +221,7 @@ enum connection_mode {
 	LWS_CONNMODE_SSL_ACK_PENDING,
 
 	/* transient modes */
+	LWS_CONNMODE_WS_CLIENT_WAITING_CONNECT,
 	LWS_CONNMODE_WS_CLIENT_WAITING_PROXY_REPLY,
 	LWS_CONNMODE_WS_CLIENT_ISSUE_HANDSHAKE,
 	LWS_CONNMODE_WS_CLIENT_WAITING_SERVER_REPLY,
@@ -286,19 +287,6 @@ struct libwebsocket_context {
 	struct libwebsocket_extension *extensions;
 #endif
 	void *user_space;
-};
-
-
-enum pending_timeout {
-	NO_PENDING_TIMEOUT = 0,
-	PENDING_TIMEOUT_AWAITING_PROXY_RESPONSE,
-	PENDING_TIMEOUT_ESTABLISH_WITH_SERVER,
-	PENDING_TIMEOUT_AWAITING_SERVER_RESPONSE,
-	PENDING_TIMEOUT_AWAITING_PING,
-	PENDING_TIMEOUT_CLOSE_ACK,
-	PENDING_TIMEOUT_AWAITING_EXTENSION_CONNECT_RESPONSE,
-	PENDING_TIMEOUT_SENT_CLIENT_HANDSHAKE,
-	PENDING_TIMEOUT_SSL_ACCEPT,
 };
 
 
@@ -442,10 +430,6 @@ wsi_from_fd(struct libwebsocket_context *context, int fd);
 LWS_EXTERN int
 insert_wsi_socket_into_fds(struct libwebsocket_context *context,
 						      struct libwebsocket *wsi);
-
-LWS_EXTERN void
-libwebsocket_set_timeout(struct libwebsocket *wsi,
-					 enum pending_timeout reason, int secs);
 
 LWS_EXTERN int
 lws_issue_raw(struct libwebsocket *wsi, unsigned char *buf, size_t len);
