@@ -1,20 +1,16 @@
-This is the libwebsockets C library for lightweight websocket clients and
-servers.  For support, visit
+TO build lib, need install cmake.
 
- http://libwebsockets.org
+iOS:
+$cd libwebsockets/ios
+$./build_framework.py buildname
 
-and consider joining the project mailing list at
 
- http://ml.libwebsockets.org/mailman/listinfo/libwebsockets
+Android:
+$export ANDROID_NDK=/absolute/path/to/the/android-ndk
+$cd libwebsockets/android
+$./scripts/cmake_android_armeabi.sh
 
-You can get the latest version of the library from git
+If you Android NDK is x86_64, you may need put below code to android.toolchain.cmake
 
-http://git.libwebsockets.org
-https://github.com/warmcat/libwebsockets
-
-for more information:
-
-README.build      - information on building the library
-README.coding     - information for writing code using the library
-README.test-apps  - information about the test apps built with the library
+set( ANDROID_NDK_HOST_X64 1 CACHE BOOL "Try to use 64-bit compiler toolchain" )
 
