@@ -1,17 +1,25 @@
 #include "private-libwebsockets.h"
 
-struct libwebsocket *__libwebsocket_client_connect_2(
+struct libwebsocket *libwebsocket_client_connect_2(
 	struct libwebsocket_context *context,
 	struct libwebsocket *wsi
 ) {
-	struct pollfd pfd;
+	struct libwebsocket_pollfd pfd;
+#ifdef LWS_USE_IPV6
+	struct sockaddr_in6 server_addr6;
+	struct sockaddr_in6 client_addr6;
+	struct addrinfo hints, *result;
+#endif
+	struct sockaddr_in server_addr4;
+	struct sockaddr_in client_addr4;
 	struct hostent *server_hostent;
-	struct sockaddr_in server_addr;
+
+	struct sockaddr *v;
 	int n;
 	int plen = 0;
 	const char *ads;
 
-	lwsl_client("__libwebsocket_client_connect_2\n");
+       lwsl_client("libwebsocket_client_connect_2\n");
 
 	/*
 	 * proxy?
@@ -25,6 +33,180 @@ struct libwebsocket *__libwebsocket_client_connect_2(
 			"\x0d\x0a",
 			lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_PEER_ADDRESS),
 			wsi->u.hdr.ah->c_port);
+		ads = context->http_proxy_address;
+
+#ifdef LWS_USE_IPV6
+		if (LWS_IPV6_ENABLED(context))
+			server_addr6.sin6_port = htons(context->http_proxy_port);
+		else
+#endif
+			server_addr4.sin_port = htons(context->http_proxy_port);
+
+	} else {
+		ads = lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_PEER_ADDRESS);
+#ifdef LWS_USE_IPV6
+		if (LWS_IPV6_ENABLED(context))
+			server_addr6.sin6_port = htons(wsi->u.hdr.ah->c_port);
+		else
+#endif
+			server_addr4.sin_port = htons(wsi->u.hdr.ah->c_port);
+	}
+
+	/*
+	 * prepare the actual connection (to the proxy, if any)
+	 */
+       lwsl_client("libwebsocket_client_connect_2: address %s\n", ads);
+
+#ifdef LWS_USE_IPV6
+	if (LWS_IPV6_ENABLED(context)) {
+		memset(&hints, 0, sizeof(struct addrinfo));
+		n = getaddrinfo(ads, NULL, &hints, &result);
+		if (n) {
+#ifdef _WIN32
+			lwsl_err("getaddrinfo: %ls\n", gai_strerrorW(n));
+#else
+			lwsl_err("getaddrinfo: %s\n", gai_strerror(n));
+#endif
+			goto oom4;
+		}
+
+		server_addr6.sin6_family = AF_INET6;
+		switch (result->ai_family) {
+		case AF_INET:
+			/* map IPv4 to IPv6 */
+			bzero((char *)&server_addr6.sin6_addr,
+						sizeof(struct in6_addr));
+			server_addr6.sin6_addr.s6_addr[10] = 0xff;
+			server_addr6.sin6_addr.s6_addr[11] = 0xff;
+			memcpy(&server_addr6.sin6_addr.s6_addr[12],
+				&((struct sockaddr_in *)result->ai_addr)->sin_addr,
+							sizeof(struct in_addr));
+			break;
+		case AF_INET6:
+			memcpy(&server_addr6.sin6_addr,
+			  &((struct sockaddr_in6 *)result->ai_addr)->sin6_addr,
+						sizeof(struct in6_addr));
+			break;
+		default:
+			lwsl_err("Unknown address family\n");
+			freeaddrinfo(result);
+			goto oom4;
+		}
+
+		freeaddrinfo(result);
+	} else
+#endif
+	{
+		server_hostent = gethostbyname(ads);
+		if (!server_hostent) {
+			lwsl_err("Unable to get host name from %s\n", ads);
+			goto oom4;
+		}
+
+		server_addr4.sin_family = AF_INET;
+		server_addr4.sin_addr =
+				*((struct in_addr *)server_hostent->h_addr);
+		bzero(&server_addr4.sin_zero, 8);
+	}
+
+	if (wsi->sock < 0) {
+
+#ifdef LWS_USE_IPV6
+		if (LWS_IPV6_ENABLED(context))
+			wsi->sock = socket(AF_INET6, SOCK_STREAM, 0);
+		else
+#endif
+			wsi->sock = socket(AF_INET, SOCK_STREAM, 0);
+
+		if (wsi->sock < 0) {
+			lwsl_warn("Unable to open socket\n");
+			goto oom4;
+		}
+
+		if (lws_plat_set_socket_options(context, wsi->sock)) {
+			lwsl_err("Failed to set wsi socket options\n");
+			compatible_close(wsi->sock);
+			goto oom4;
+		}
+
+		wsi->mode = LWS_CONNMODE_WS_CLIENT_WAITING_CONNECT;
+
+		insert_wsi_socket_into_fds(context, wsi);
+
+		libwebsocket_set_timeout(wsi,
+			PENDING_TIMEOUT_AWAITING_CONNECT_RESPONSE,
+							      AWAITING_TIMEOUT);
+#ifdef LWS_USE_IPV6
+		if (LWS_IPV6_ENABLED(context)) {
+			v = (struct sockaddr *)&client_addr6;
+			n = sizeof(client_addr6);
+			bzero((char *)v, n);
+			client_addr6.sin6_family = AF_INET6;
+		} else
+#endif
+		{
+			v = (struct sockaddr *)&client_addr4;
+			n = sizeof(client_addr4);
+			bzero((char *)v, n);
+			client_addr4.sin_family = AF_INET;
+		}
+
+		if (context->iface) {
+			if (interface_to_sa(context, context->iface,
+					(struct sockaddr_in *)v, n) < 0) {
+				lwsl_err("Unable to find interface %s\n",
+								context->iface);
+				compatible_close(wsi->sock);
+				goto failed;
+			}
+
+			if (bind(wsi->sock, v, n) < 0) {
+				lwsl_err("Error binding to interface %s",
+								context->iface);
+				compatible_close(wsi->sock);
+				goto failed;
+			}
+		}
+	}
+
+#ifdef LWS_USE_IPV6
+	if (LWS_IPV6_ENABLED(context)) {
+		v = (struct sockaddr *)&server_addr6;
+		n = sizeof(struct sockaddr_in6);
+	} else
+#endif
+	{
+		v = (struct sockaddr *)&server_addr4;
+		n = sizeof(struct sockaddr);
+	}
+
+	if (connect(wsi->sock, v, n) == -1 || LWS_ERRNO == LWS_EISCONN) {
+
+		if (LWS_ERRNO == LWS_EALREADY || LWS_ERRNO == LWS_EINPROGRESS
+		                              || LWS_ERRNO == LWS_EWOULDBLOCK) {
+			lwsl_client("nonblocking connect retry\n");
+
+			/*
+			 * must do specifically a POLLOUT poll to hear
+			 * about the connect completion
+			 */
+			if (lws_change_pollfd(wsi, 0, LWS_POLLOUT))
+				goto oom4;
+
+			return wsi;
+		}
+
+		if (LWS_ERRNO != LWS_EISCONN) {
+			lwsl_debug("Connect failed errno=%d\n", LWS_ERRNO);
+			goto failed;
+		}
+	}
+
+	lwsl_client("connected\n");
+
+	/* we are connected to server, or proxy */
+
+	if (context->http_proxy_port) {
 
 		/* OK from now on we talk via the proxy, so connect to that */
 
@@ -34,62 +216,13 @@ struct libwebsocket *__libwebsocket_client_connect_2(
 		 */
 		if (lws_hdr_simple_create(wsi, _WSI_TOKEN_CLIENT_PEER_ADDRESS,
 						   context->http_proxy_address))
-			goto oom4;
+			goto failed;
 		wsi->u.hdr.ah->c_port = context->http_proxy_port;
-	}
-
-	/*
-	 * prepare the actual connection (to the proxy, if any)
-	 */
-
-	ads = lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_PEER_ADDRESS);
-
-	lwsl_client("__libwebsocket_client_connect_2: address %s\n", ads);
-
-	server_hostent = gethostbyname(ads);
-	if (server_hostent == NULL) {
-		lwsl_err("Unable to get host name from %s\n", ads);
-		goto oom4;
-	}
-
-	wsi->sock = socket(AF_INET, SOCK_STREAM, 0);
-
-	if (wsi->sock < 0) {
-		lwsl_warn("Unable to open socket\n");
-		goto oom4;
-	}
-
-	server_addr.sin_family = AF_INET;
-	server_addr.sin_port = htons(wsi->u.hdr.ah->c_port);
-	server_addr.sin_addr = *((struct in_addr *)server_hostent->h_addr);
-	bzero(&server_addr.sin_zero, 8);
-
-	if (connect(wsi->sock, (struct sockaddr *)&server_addr,
-					     sizeof(struct sockaddr)) == -1)  {
-		lwsl_debug("Connect failed\n");
-		compatible_close(wsi->sock);
-		goto oom4;
-	}
-
-	lwsl_client("connected\n");
-
-	if (lws_set_socket_options(context, wsi->sock)) {
-		lwsl_err("Failed to set wsi socket options\n");
-		compatible_close(wsi->sock);
-		goto oom4;
-	}
-
-	insert_wsi_socket_into_fds(context, wsi);
-
-	/* we are connected to server, or proxy */
-
-	if (context->http_proxy_port) {
 
 		n = send(wsi->sock, context->service_buffer, plen, MSG_NOSIGNAL);
 		if (n < 0) {
-			compatible_close(wsi->sock);
 			lwsl_debug("ERROR writing to proxy socket\n");
-			goto oom4;
+			goto failed;
 		}
 
 		libwebsocket_set_timeout(wsi,
@@ -116,12 +249,12 @@ struct libwebsocket *__libwebsocket_client_connect_2(
 
 	wsi->mode = LWS_CONNMODE_WS_CLIENT_ISSUE_HANDSHAKE;
 	pfd.fd = wsi->sock;
-	pfd.revents = POLLIN;
+	pfd.revents = LWS_POLLIN;
 
 	n = libwebsocket_service_fd(context, &pfd);
 
 	if (n < 0)
-		goto oom4;
+		goto failed;
 
 	if (n) /* returns 1 on failure after closing wsi */
 		return NULL;
@@ -131,7 +264,11 @@ struct libwebsocket *__libwebsocket_client_connect_2(
 oom4:
 	free(wsi->u.hdr.ah);
 	free(wsi);
+	return NULL;
 
+failed:
+	libwebsocket_close_and_free_session(context, wsi,
+						     LWS_CLOSE_STATUS_NOSTATUS);
 	return NULL;
 }
 
@@ -166,25 +303,13 @@ libwebsocket_client_connect(struct libwebsocket_context *context,
 			      int ietf_version_or_minus_one)
 {
 	struct libwebsocket *wsi;
-#ifndef LWS_NO_EXTENSIONS
-	int n;
-	int m;
-	struct libwebsocket_extension *ext;
-	int handled;
-#endif
-
-#ifndef LWS_OPENSSL_SUPPORT
-	if (ssl_connection) {
-		lwsl_err("libwebsockets not configured for ssl\n");
-		return NULL;
-	}
-#endif
 
 	wsi = (struct libwebsocket *) malloc(sizeof(struct libwebsocket));
 	if (wsi == NULL)
 		goto bail;
 
 	memset(wsi, 0, sizeof(*wsi));
+	wsi->sock = -1;
 
 	/* -1 means just use latest supported */
 
@@ -196,11 +321,14 @@ libwebsocket_client_connect(struct libwebsocket_context *context,
 	wsi->state = WSI_STATE_CLIENT_UNCONNECTED;
 	wsi->protocol = NULL;
 	wsi->pending_timeout = NO_PENDING_TIMEOUT;
-#ifndef LWS_NO_EXTENSIONS
-	wsi->count_active_extensions = 0;
-#endif
+
 #ifdef LWS_OPENSSL_SUPPORT
 	wsi->use_ssl = ssl_connection;
+#else
+	if (ssl_connection) {
+		lwsl_err("libwebsockets not configured for ssl\n");
+		goto bail;
+	}
 #endif
 
 	if (lws_allocate_header_table(wsi))
@@ -237,30 +365,16 @@ libwebsocket_client_connect(struct libwebsocket_context *context,
 
 	wsi->protocol = &context->protocols[0];
 
-#ifndef LWS_NO_EXTENSIONS
 	/*
 	 * Check with each extension if it is able to route and proxy this
 	 * connection for us.  For example, an extension like x-google-mux
 	 * can handle this and then we don't need an actual socket for this
 	 * connection.
 	 */
-
-	handled = 0;
-	ext = context->extensions;
-	n = 0;
-
-	while (ext && ext->callback && !handled) {
-		m = ext->callback(context, ext, wsi,
+	
+	if (lws_ext_callback_for_each_extension_type(context, wsi,
 			LWS_EXT_CALLBACK_CAN_PROXY_CLIENT_CONNECTION,
-				 (void *)(long)n, (void *)address, port);
-		if (m)
-			handled = 1;
-
-		ext++;
-		n++;
-	}
-
-	if (handled) {
+						(void *)address, port) > 0) {
 		lwsl_client("libwebsocket_client_connect: ext handling conn\n");
 
 		libwebsocket_set_timeout(wsi,
@@ -270,10 +384,9 @@ libwebsocket_client_connect(struct libwebsocket_context *context,
 		wsi->mode = LWS_CONNMODE_WS_CLIENT_WAITING_EXTENSION_CONNECT;
 		return wsi;
 	}
-#endif
 	lwsl_client("libwebsocket_client_connect: direct conn\n");
 
-	return __libwebsocket_client_connect_2(context, wsi);
+       return libwebsocket_client_connect_2(context, wsi);
 
 bail1:
 	free(wsi->u.hdr.ah);
@@ -321,8 +434,10 @@ libwebsocket_client_connect_extended(struct libwebsocket_context *context,
 			ssl_connection, path, host, origin, protocol,
 						     ietf_version_or_minus_one);
 
-	if (ws && !ws->user_space && userdata)
+	if (ws && !ws->user_space && userdata) {
+		ws->user_space_externally_allocated = 1;
 		ws->user_space = userdata ;
+	}
 
 	return ws ;
 }

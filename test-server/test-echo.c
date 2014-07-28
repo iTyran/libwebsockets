@@ -24,16 +24,16 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <getopt.h>
 #include <string.h>
-#include <sys/time.h>
 #include <assert.h>
-#ifdef WIN32
-#else
-#include <syslog.h>
-#endif
 #include <signal.h>
+
+#ifndef _WIN32
+#include <syslog.h>
+#include <sys/time.h>
+#include <unistd.h>
+#endif
 
 #ifdef CMAKE_BUILD
 #include "lws_config.h"
@@ -41,7 +41,7 @@
 
 #include "../lib/libwebsockets.h"
 
-int force_exit = 0;
+static volatile int force_exit = 0;
 
 #define MAX_ECHO_PAYLOAD 1400
 #define LOCAL_RESOURCE_PATH INSTALL_DATADIR"/libwebsockets-test-server"
@@ -250,16 +250,19 @@ int main(int argc, char **argv)
 		}
 	}
 
-#ifndef LWS_NO_DAEMONIZE
+#ifndef LWS_NO_DAEMONIZE 
 	/*
 	 * normally lock path would be /var/lock/lwsts or similar, to
 	 * simplify getting started without having to take care about
 	 * permissions or running as root, set to /tmp/.lwsts-lock
 	 */
+#if defined(WIN32) || defined(_WIN32)
+#else
 	if (!client && daemonize && lws_daemonize("/tmp/.lwstecho-lock")) {
 		fprintf(stderr, "Failed to daemonize\n");
 		return 1;
 	}
+#endif
 #endif
 
 #ifdef WIN32

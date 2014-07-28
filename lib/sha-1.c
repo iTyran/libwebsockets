@@ -32,39 +32,11 @@
  * implemented by Jun-ichiro itojun Itoh <itojun@itojun.org>
  */
 
+#include "private-libwebsockets.h"
+
+#ifdef HAVE_SYS_TYPES_H
 #include <sys/types.h>
-#ifdef WIN32
-
-#ifndef BIG_ENDIAN
-#define BIG_ENDIAN    4321  /* to show byte order (taken from gcc) */
 #endif
-#ifndef LITTLE_ENDIAN
-#define LITTLE_ENDIAN 1234
-#endif
-#ifndef BYTE_ORDER
-#define BYTE_ORDER LITTLE_ENDIAN
-#endif
-
-typedef unsigned __int64 u_int64_t;
-
-#undef __P
-#ifndef __P
-#if __STDC__
-#define __P(protos) protos
-#else
-#define __P(protos) ()
-#endif
-#endif
-
-#define bzero(b, len) (memset((b), '\0', (len)), (void) 0)
-
-#else
-#include <sys/stat.h>
-#include <sys/cdefs.h>
-#include <sys/time.h>
-#endif
-
-#include <string.h>
 
 struct sha1_ctxt {
 	union {
@@ -83,7 +55,9 @@ struct sha1_ctxt {
 };
 
 /* sanity check */
-#if BYTE_ORDER != BIG_ENDIAN
+#if !defined(BYTE_ORDER) || !defined(LITTLE_ENDIAN) || !defined(BIG_ENDIAN)
+# define unsupported 1
+#elif BYTE_ORDER != BIG_ENDIAN
 # if BYTE_ORDER != LITTLE_ENDIAN
 #  define unsupported 1
 # endif

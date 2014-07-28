@@ -14,3 +14,4 @@ If you Android NDK is x86_64, you may need put below code to android.toolchain.c
 
 set( ANDROID_NDK_HOST_X64 1 CACHE BOOL "Try to use 64-bit compiler toolchain" )
 
+如何Android编译找不到NDK，可能需要手动打开上面的条件。

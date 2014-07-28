@@ -17,11 +17,23 @@
 /* Build with OpenSSL support */
 #cmakedefine LWS_OPENSSL_SUPPORT
 
+/* The client should load and trust CA root certs it finds in the OS */
+#cmakedefine LWS_SSL_CLIENT_USE_OS_CA_CERTS
+
 /* Sets the path where the client certs should be installed. */
 #cmakedefine LWS_OPENSSL_CLIENT_CERTS "${LWS_OPENSSL_CLIENT_CERTS}"
 
 /* Turn off websocket extensions */
 #cmakedefine LWS_NO_EXTENSIONS
+
+/* Enable libev io loop */
+#cmakedefine LWS_USE_LIBEV
+
+/* Build with support for ipv6 */
+#cmakedefine LWS_USE_IPV6
+
+/* Build with support for HTTP2 */
+#cmakedefine LWS_USE_HTTP2
 
 /* Turn on latency measuring code */
 #cmakedefine LWS_LATENCY
@@ -52,6 +64,12 @@
 
 /* Define to 1 if you have the `fork' function. */
 #cmakedefine HAVE_FORK
+
+/* Define to 1 if you have the `getenv’ function. */
+#cmakedefine HAVE_GETENV
+
+/* Define to 1 if you have the <in6addr.h> header file. */
+#cmakedefine HAVE_IN6ADDR_H
 
 /* Define to 1 if you have the <inttypes.h> header file. */
 #cmakedefine HAVE_INTTYPES_H

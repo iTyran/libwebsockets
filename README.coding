@@ -67,6 +67,20 @@ in the ...WRITEABLE callback.
 See the test server code for an example of how to do this.
 
 
+Do not rely on only your own WRITEABLE requests appearing
+---------------------------------------------------------
+
+Libwebsockets may generate additional LWS_CALLBACK_CLIENT_WRITEABLE events
+if it met network conditions where it had to buffer your send data internally.
+
+So your code for LWS_CALLBACK_CLIENT_WRITEABLE needs to own the decision
+about what to send, it can't assume that just because the writeable callback
+came it really is time to send something.
+
+It's quite possible you get an 'extra' writeable callback at any time and
+just need to return 0 and wait for the expected callback later.
+
+
 Closing connections from the user side
 --------------------------------------
 
@@ -230,4 +244,24 @@ is too computationally expensive.  To use it, point it to a string like
 "RC4-MD5:RC4-SHA:AES128-SHA:AES256-SHA:HIGH:!DSS:!aNULL"
 
 if left NULL, then the "DEFAULT" set of ciphers are all possible to select.
+
+
+Async nature of client connections
+----------------------------------
+
+When you call libwebsocket_client_connect(..) and get a wsi back, it does not
+mean your connection is active.  It just mean it started trying to connect.
+
+Your client connection is actually active only when you receive
+LWS_CALLBACK_CLIENT_ESTABLISHED for it.
+
+There's a 5 second timeout for the connection, and it may give up or die for
+other reasons, if any of that happens you'll get a
+LWS_CALLBACK_CLIENT_CONNECTION_ERROR callback on protocol 0 instead for the
+wsi.
+
+After attempting the connection and getting back a non-NULL wsi you should
+loop calling libwebsocket_service() until one of the above callbacks occurs.
+
+As usual, see test-client.c for example code.
 

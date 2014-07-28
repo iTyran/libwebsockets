@@ -1,7 +1,192 @@
 Changelog
 ---------
 
-(development since 1.22)
+v1.3-chrome37-firefox30
+=======================
+
+ .gitignore                                               |    1 -
+ CMakeLists.txt                                           |  447 +++--
+ README.build                                             |   35 +-
+ README.coding                                            |   14 +
+ changelog                                                |   66 +
+ cmake/LibwebsocketsConfig.cmake.in                       |   17 +
+ cmake/LibwebsocketsConfigVersion.cmake.in                |   11 +
+ config.h.cmake                                           |   18 +
+ cross-ming.cmake                                         |   31 +
+ cross-openwrt-makefile                                   |   91 +
+ lib/client-handshake.c                                   |  205 ++-
+ lib/client-parser.c                                      |   58 +-
+ lib/client.c                                             |  158 +-
+ lib/context.c                                            |  341 ++++
+ lib/extension-deflate-frame.c                            |    2 +-
+ lib/extension.c                                          |  178 ++
+ lib/handshake.c                                          |  287 +---
+ lib/lextable.h                                           |  338 ++++
+ lib/libev.c                                              |  175 ++
+ lib/libwebsockets.c                                      | 2089 +++--------------------
+ lib/libwebsockets.h                                      |  253 ++-
+ lib/lws-plat-unix.c                                      |  404 +++++
+ lib/lws-plat-win.c                                       |  358 ++++
+ lib/minilex.c                                            |  530 +++---
+ lib/output.c                                             |  445 ++---
+ lib/parsers.c                                            |  682 ++++----
+ lib/pollfd.c                                             |  239 +++
+ lib/private-libwebsockets.h                              |  501 +++++-
+ lib/server-handshake.c                                   |  274 +--
+ lib/server.c                                             |  858 ++++++++--
+ lib/service.c                                            |  517 ++++++
+ lib/sha-1.c                                              |   38 +-
+ lib/ssl-http2.c                                          |   78 +
+ lib/ssl.c                                                |  571 +++++++
+ test-server/attack.sh                                    |  101 +-
+ test-server/test-client.c                                |    9 +-
+ test-server/test-echo.c                                  |   17 +-
+ test-server/test-fraggle.c                               |    7 -
+ test-server/test-ping.c                                  |   12 +-
+ test-server/test-server.c                                |  330 ++--
+ test-server/test.html                                    |    4 +-
+ win32port/client/client.vcxproj                          |  259 ---
+ win32port/client/client.vcxproj.filters                  |   39 -
+ .../libwebsocketswin32.vcxproj.filters                   |   93 -
+ win32port/server/server.vcxproj                          |  276 ---
+ win32port/server/server.vcxproj.filters                  |   51 -
+ win32port/win32helpers/gettimeofday.h                    |   59 +-
+ win32port/win32helpers/netdb.h                           |    1 -
+ win32port/win32helpers/strings.h                         |    0
+ win32port/win32helpers/sys/time.h                        |    1 -
+ win32port/win32helpers/unistd.h                          |    0
+ win32port/win32helpers/websock-w32.c                     |  104 --
+ win32port/win32helpers/websock-w32.h                     |   62 -
+ win32port/win32port.sln                                  |  100 --
+ win32port/zlib/gzio.c                                    |    3 +-
+ 55 files changed, 6779 insertions(+), 5059 deletions(-)
+
+
+User api additions
+------------------
+
+POST method is supported
+
+The protocol 0 / HTTP callback can now get two new kinds of callback,
+LWS_CALLBACK_HTTP_BODY (in and len are a chunk of the body of the HTTP request)
+and LWS_CALLBACK_HTTP_BODY_COMPLETION (the expected amount of body has arrived
+and been passed to the user code already).  These callbacks are used with the
+post method (see the test server for details).
+
+The period between the HTTP header completion and the completion of the body
+processing is protected by a 5s timeout.
+
+The chunks are stored in a malloc'd buffer of size protocols[0].rx_buffer_size.
+
+
+New server option you can enable from user code
+LWS_SERVER_OPTION_ALLOW_NON_SSL_ON_SSL_PORT allows non-SSL connections to
+also be accepted on an SSL listening port.  It's disabled unless you enable
+it explicitly.
+
+
+Two new callbacks are added in protocols[0] that are optional for allowing
+limited thread access to libwebsockets, LWS_CALLBACK_LOCK_POLL and
+LWS_CALLBACK_UNLOCK_POLL.
+
+If you use them, they protect internal and external poll list changes, but if
+you want to use external thread access to libwebsocket_callback_on_writable()
+you have to implement your locking here even if you don't use external
+poll support.
+
+If you will use another thread for this, take a lot of care about managing
+your list of live wsi by doing it from ESTABLISHED and CLOSED callbacks
+(with your own locking).
+
+If you configure cmake with -DLWS_WITH_LIBEV=1 then the code allowing the libev
+eventloop instead of the default poll() one will also be compiled in.  But to
+use it, you must also set the LWS_SERVER_OPTION_LIBEV flag on the context
+creation info struct options member.
+
+IPV6 is supported and enabled by default except for Windows, you can disable
+the support at build-time by giving -DLWS_IPV6=, and disable use of it even if
+compiled in by making sure the flag LWS_SERVER_OPTION_DISABLE_IPV6 is set on
+the context creation info struct options member.
+
+You can give LWS_SERVER_OPTION_DISABLE_OS_CA_CERTS option flag to
+guarantee the OS CAs will not be used, even if that support was selected at
+build-time.
+
+Optional "token limits" may be enforced by setting the member "token_limits"
+in struct lws_context_creation_info to point to a struct lws_token_limits.
+NULL means no token limits used for compatibility.
+
+
+User api changes
+----------------
+
+Extra optional argument to libwebsockets_serve_http_file() allows injecion
+of HTTP headers into the canned response.  Eg, cookies may be added like
+that without getting involved in having to send the header by hand.
+
+A new info member http_proxy_address may be used at context creation time to
+set the http proxy.  If non-NULL, it overrides http_proxy environment var.
+
+Cmake supports LWS_SSL_CLIENT_USE_OS_CA_CERTS defaulting to on, which gets
+the client to use the OS CA Roots.  If you're worried somebody with the
+ability to forge for force creation of a client cert from the root CA in
+your OS, you should disable this since your selfsigned $0 cert is a lot safer
+then...
+
+
+v1.23-chrome32-firefox24
+========================
+
+ Android.mk                            |   29 +
+ CMakeLists.txt                        |  573 ++++++++----
+ COPYING                               |  503 -----------
+ INSTALL                               |  365 --------
+ Makefile.am                           |   13 -
+ README.build                          |  371 ++------
+ README.coding                         |   63 ++
+ autogen.sh                            | 1578 ---------------------------------
+ changelog                             |   69 ++
+ cmake/FindGit.cmake                   |  163 ++++
+ cmake/FindOpenSSLbins.cmake           |   15 +-
+ cmake/UseRPMTools.cmake               |  176 ++++
+ config.h.cmake                        |   25 +-
+ configure.ac                          |  226 -----
+ cross-arm-linux-gnueabihf.cmake       |   28 +
+ lib/Makefile.am                       |   89 --
+ lib/base64-decode.c                   |   98 +-
+ lib/client-handshake.c                |  123 ++-
+ lib/client-parser.c                   |   19 +-
+ lib/client.c                          |  145 ++-
+ lib/daemonize.c                       |    4 +-
+ lib/extension.c                       |    2 +-
+ lib/getifaddrs.h                      |    4 +-
+ lib/handshake.c                       |   76 +-
+ lib/libwebsockets.c                   |  491 ++++++----
+ lib/libwebsockets.h                   |  164 ++--
+ lib/output.c                          |  214 ++++-
+ lib/parsers.c                         |  102 +--
+ lib/private-libwebsockets.h           |   66 +-
+ lib/server-handshake.c                |    5 +-
+ lib/server.c                          |   29 +-
+ lib/sha-1.c                           |    2 +-
+ libwebsockets-api-doc.html            |  249 +++---
+ libwebsockets.pc.in                   |   11 -
+ libwebsockets.spec                    |   14 +-
+ m4/ignore-me                          |    2 -
+ scripts/FindLibWebSockets.cmake       |   33 +
+ scripts/kernel-doc                    |    1 +
+ test-server/Makefile.am               |  131 ---
+ test-server/leaf.jpg                  |  Bin 0 -> 2477518 bytes
+ test-server/test-client.c             |   78 +-
+ test-server/test-echo.c               |   33 +-
+ test-server/test-fraggle.c            |   26 +-
+ test-server/test-ping.c               |   15 +-
+ test-server/test-server.c             |  197 +++-
+ test-server/test.html                 |    5 +-
+ win32port/win32helpers/gettimeofday.c |   74 +-
+ win32port/win32helpers/websock-w32.h  |    6 +-
+ 48 files changed, 2493 insertions(+), 4212 deletions(-)
+
 
 User api additions
 ------------------
@@ -37,6 +222,14 @@ User api additions
 	move the protocol name to the "in" parameter.  The docs for this
 	callback are also updated to reflect how to check headers in there.
 
+ - libwebsocket_client_connect() is now properly nonblocking and async.  See
+	README.coding and test-client.c for information on the callbacks you
+	can rely on controlling the async connection period with.
+
+ - if your OS does not support the http_proxy environment variable convention
+ 	(eg, reportedly OSX), you can use a new api libwebsocket_set_proxy()
+ 	to set the proxy details inbetween context creation and the connection
+ 	action.  For OSes that support http_proxy, that's used automatically.
 
 User api changes
 ----------------
