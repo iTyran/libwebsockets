@@ -1,15 +1,15 @@
-cmake_minimum_required(VERSION 2.6)
+cmake_minimum_required(VERSION 2.8)
 
-project(libwebsockets)
+project(libwebsockets C)
 
 set(PACKAGE "libwebsockets")
 set(CPACK_PACKAGE_NAME "${PACKAGE}")
 set(CPACK_PACKAGE_VERSION_MAJOR "1")
-set(CPACK_PACKAGE_VERSION_MINOR "3")
+set(CPACK_PACKAGE_VERSION_MINOR "4")
 set(CPACK_PACKAGE_VERSION "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}")
 set(CPACK_PACKAGE_VENDOR "andy@warmcat.com")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PACKAGE} ${PACKAGE_VERSION}")
-set(SOVERSION "4.0.0")
+set(SOVERSION "5")
 set(CPACK_SOURCE_GENERATOR "TGZ")
 set(CPACK_SOURCE_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}")
 set(VERSION "${CPACK_PACKAGE_VERSION}")
@@ -52,7 +52,7 @@ option(LWS_WITHOUT_EXTENSIONS "Don't compile with extensions" OFF)
 option(LWS_WITH_LATENCY "Build latency measuring code into the library" OFF)
 option(LWS_WITHOUT_DAEMONIZE "Don't build the daemonization api" OFF)
 option(LWS_WITH_LIBEV "Compile with support for libev" OFF)
-option(LWS_IPV6 "Compile with support for ipv6" ON)
+option(LWS_IPV6 "Compile with support for ipv6" OFF)
 option(LWS_WITH_HTTP2 "Compile with support for http2" OFF)
 
 # Allow the user to override installation directories.
@@ -260,11 +260,11 @@ include_directories("${PROJECT_SOURCE_DIR}/lib")
 # Some IDEs use this for nicer file structure.
 set(HDR_PRIVATE
 	lib/private-libwebsockets.h
-	"${PROJECT_BINARY_DIR}/lws_config.h"
 	)
 
 set(HDR_PUBLIC	
 	"${PROJECT_SOURCE_DIR}/lib/libwebsockets.h"
+	"${PROJECT_BINARY_DIR}/lws_config.h"
 	)
 
 set(SOURCES
@@ -277,6 +277,7 @@ set(SOURCES
 	lib/parsers.c
 	lib/context.c
 	lib/sha-1.c
+	lib/alloc.c
 	)
 
 if (NOT LWS_WITHOUT_CLIENT)
@@ -295,6 +296,8 @@ endif()
 
 if (LWS_WITH_HTTP2)
 	list(APPEND SOURCES
+		lib/http2.c
+		lib/hpack.c
 		lib/ssl-http2.c
 		)
 endif()
@@ -358,10 +361,15 @@ endif(UNIX)
 
 
 if (CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUCXX)
+    include (CheckCCompilerFlag)
+    CHECK_C_COMPILER_FLAG(-fvisibility=hidden HAVE_VISIBILITY)
+    if (HAVE_VISIBILITY)
+                set(VISIBILITY_FLAG -fvisibility=hidden)
+    endif()
     if (UNIX)
-	set( CMAKE_C_FLAGS "-Wall -Werror -O4 -fvisibility=hidden ${CMAKE_C_FLAGS}" )
+		set( CMAKE_C_FLAGS "-Wall -Werror -O3 ${VISIBILITY_FLAG} ${CMAKE_C_FLAGS}" )
     else(UNIX)
-	set( CMAKE_C_FLAGS "-Wall -O4 -fvisibility=hidden ${CMAKE_C_FLAGS}" )
+		set( CMAKE_C_FLAGS "-Wall -O3 ${VISIBILITY_FLAG} ${CMAKE_C_FLAGS}" )
     endif(UNIX)
 endif ()
 
@@ -491,8 +499,14 @@ if (LWS_WITH_SSL)
 
 		list(APPEND LIB_LIST "${LWS_CYASSL_LIB}")
 	else()
+		if (OPENSSL_ROOT_DIR)
+			set(OPENSSL_INCLUDE_DIR "${OPENSSL_ROOT_DIR}/include")
+			set(OPENSSL_LIBRARIES "${OPENSSL_ROOT_DIR}/lib/libssl.so" "${OPENSSL_ROOT_DIR}/lib/libcrypto.so")
+		else(OPENSSL_ROOT_DIR)
+		
 		# TODO: Add support for STATIC also.
 		find_package(OpenSSL REQUIRED)
+		endif(OPENSSL_ROOT_DIR)
 
 		message("OpenSSL include dir: ${OPENSSL_INCLUDE_DIR}")
 		message("OpenSSL libraries: ${OPENSSL_LIBRARIES}")

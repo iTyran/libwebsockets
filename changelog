@@ -1,6 +1,110 @@
 Changelog
 ---------
 
+v1.4-chrome43-firefox36
+=======================
+
+User api additions
+------------------
+
+There's a new member in the info struct used to control context creation,
+ssl_private_key_password, which allows passing into lws the passphrase on
+an SSL cetificate
+
+There's a new member in struct protocols, id, which is ignored by lws but can
+be used by the user code to mark the selected protocol by user-defined version
+or capabliity flag information, for the case multiple versions of a protocol are
+supported.
+
+int lws_is_ssl(wsi) added to allow user code to know if the connection was made
+over ssl or not.  If LWS_SERVER_OPTION_ALLOW_NON_SSL_ON_SSL_PORT is used, both
+ssl and non-ssl connections are possible and may need to be treated differently
+in the user code.
+
+int lws_partial_buffered(wsi) added... should be checked after any
+libwebsocket_write that will be followed by another libwebsocket_write inside
+the same writeable callback.  If set, you can't do any more writes until the
+writeable callback is called again.  If you only do one write per writeable callback,
+you can ignore this.
+
+HTTP2-related: HTTP2 changes how headers are handled, lws now has new version-
+agnositic header creation APIs.  These do the right thing depending on each
+connection's HTTP version without the user code having to know or care, except
+to make sure to use the new APIs for headers (test-server is updated to use
+them already, so look there for examples)
+
+The APIs "render" the headers into a user-provided buffer and bump *p as it
+is used.  If *p reaches end, then the APIs return nonzero for error.
+
+LWS_VISIBLE LWS_EXTERN int
+lws_add_http_header_status(struct libwebsocket_context *context,
+			    struct libwebsocket *wsi,
+			    unsigned int code,
+			    unsigned char **p,
+			    unsigned char *end);
+
+Start a response header reporting status like 200, 500, etc
+
+LWS_VISIBLE LWS_EXTERN int
+lws_add_http_header_by_name(struct libwebsocket_context *context,
+			    struct libwebsocket *wsi,
+			    const unsigned char *name,
+			    const unsigned char *value,
+			    int length,
+			    unsigned char **p,
+			    unsigned char *end);
+
+Add a header like name: value in HTTP1.x
+
+LWS_VISIBLE LWS_EXTERN int 
+lws_finalize_http_header(struct libwebsocket_context *context,
+			    struct libwebsocket *wsi,
+			    unsigned char **p,
+			    unsigned char *end);
+
+Finish off the headers, like add the extra \r\n in HTTP1.x
+
+LWS_VISIBLE LWS_EXTERN int
+lws_add_http_header_by_token(struct libwebsocket_context *context,
+			    struct libwebsocket *wsi,
+			    enum lws_token_indexes token,
+			    const unsigned char *value,
+			    int length,
+			    unsigned char **p,
+			    unsigned char *end);
+
+Add a header by using a lws token as the name part.  In HTTP2, this can be
+compressed to one or two bytes.
+
+
+User api removal
+----------------
+
+protocols struct member no_buffer_all_partial_tx is removed.  Under some
+conditions like rewriting extention such as compression in use, the built-in
+partial send buffering is the only way to deal with the problem, so turning
+it off is deprecated.
+
+
+User api changes
+----------------
+
+HTTP2-related: API libwebsockets_serve_http_file() takes an extra parameter at
+the end now
+
+int other_headers_len)
+
+If you are providing other headers, they must be generated using the new
+HTTP-version-agnostic APIs, and you must provide the length of them using this
+additional parameter.
+
+struct lws_context_creation_info now has an additional member
+SSL_CTX *provided_client_ssl_ctx you may set to an externally-initialized
+SSL_CTX managed outside lws.  Defaulting to zero keeps the existing behaviour of
+lws managing the context, if you memset the struct to 0 or have as a filescope
+initialized struct in bss, no need to change anything.
+
+
 v1.3-chrome37-firefox30
 =======================
 

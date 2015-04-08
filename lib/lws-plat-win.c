@@ -33,6 +33,59 @@ time_t time(time_t *t)
 }
 #endif
 
+/* file descriptor hash management */
+
+struct libwebsocket *
+wsi_from_fd(struct libwebsocket_context *context, int fd)
+{
+	int h = LWS_FD_HASH(fd);
+	int n = 0;
+
+	for (n = 0; n < context->fd_hashtable[h].length; n++)
+		if (context->fd_hashtable[h].wsi[n]->sock == fd)
+			return context->fd_hashtable[h].wsi[n];
+
+	return NULL;
+}
+
+int
+insert_wsi(struct libwebsocket_context *context, struct libwebsocket *wsi)
+{
+	int h = LWS_FD_HASH(wsi->sock);
+
+	if (context->fd_hashtable[h].length == (getdtablesize() - 1)) {
+		lwsl_err("hash table overflow\n");
+		return 1;
+	}
+
+	context->fd_hashtable[h].wsi[context->fd_hashtable[h].length++] = wsi;
+
+	return 0;
+}
+
+int
+delete_from_fd(struct libwebsocket_context *context, int fd)
+{
+	int h = LWS_FD_HASH(fd);
+	int n = 0;
+
+	for (n = 0; n < context->fd_hashtable[h].length; n++)
+		if (context->fd_hashtable[h].wsi[n]->sock == fd) {
+			while (n < context->fd_hashtable[h].length) {
+				context->fd_hashtable[h].wsi[n] =
+					    context->fd_hashtable[h].wsi[n + 1];
+				n++;
+			}
+			context->fd_hashtable[h].length--;
+
+			return 0;
+		}
+
+	lwsl_err("Failed to find fd %d requested for "
+		 "delete in hashtable\n", fd);
+	return 1;
+}
+
 LWS_VISIBLE int libwebsockets_get_random(struct libwebsocket_context *context,
 							     void *buf, int len)
 {
@@ -104,7 +157,7 @@ lws_plat_service(struct libwebsocket_context *context, int timeout_ms)
 			continue;
 
 		if (pfd->events & LWS_POLLOUT) {
-			if (context->lws_lookup[pfd->fd]->sock_send_blocking)
+			if (wsi_from_fd(context,pfd->fd)->sock_send_blocking)
 				continue;
 			pfd->revents = LWS_POLLOUT;
 			n = libwebsocket_service_fd(context, pfd);
@@ -143,7 +196,7 @@ lws_plat_service(struct libwebsocket_context *context, int timeout_ms)
 	pfd->revents = networkevents.lNetworkEvents;
 
 	if (pfd->revents & LWS_POLLOUT)
-		context->lws_lookup[pfd->fd]->sock_send_blocking = FALSE;
+		wsi_from_fd(context,pfd->fd)->sock_send_blocking = FALSE;
 
 	return libwebsocket_service_fd(context, pfd);
 }
@@ -193,17 +246,16 @@ lws_plat_drop_app_privileges(struct lws_context_creation_info *info)
 LWS_VISIBLE int
 lws_plat_init_fd_tables(struct libwebsocket_context *context)
 {
-	context->events = (WSAEVENT *)malloc(sizeof(WSAEVENT) *
-							(context->max_fds + 1));
+	context->events = lws_malloc(sizeof(WSAEVENT) * (context->max_fds + 1));
 	if (context->events == NULL) {
 		lwsl_err("Unable to allocate events array for %d connections\n",
 			context->max_fds);
 		return 1;
 	}
-	
+
 	context->fds_count = 0;
 	context->events[0] = WSACreateEvent();
-	
+
 	context->fd_random = 0;
 
 	return 0;
@@ -236,7 +288,7 @@ lws_plat_context_early_destroy(struct libwebsocket_context *context)
 {
 	if (context->events) {
 		WSACloseEvent(context->events[0]);
-		free(context->events);
+		lws_free(context->events);
 	}
 }
 
@@ -250,7 +302,20 @@ LWS_VISIBLE int
 interface_to_sa(struct libwebsocket_context *context,
 		const char *ifname, struct sockaddr_in *addr, size_t addrlen)
 {
-	return -1;
+	long long address = inet_addr(ifname);
+
+	if (address == INADDR_NONE) {
+		struct hostent *entry = gethostbyname(ifname);
+		if (entry)
+			address = ((struct in_addr *)entry->h_addr_list[0])->s_addr;
+	}
+
+	if (address == INADDR_NONE)
+		return -1;
+
+	addr->sin_addr.s_addr = address;
+
+	return 0;
 }
 
 LWS_VISIBLE void
@@ -318,7 +383,7 @@ lws_plat_inet_ntop(int af, const void *src, char *dst, int cnt)
 	DWORD bufferlen = cnt;
 	BOOL ok = FALSE;
 
-	buffer = malloc(bufferlen);
+	buffer = lws_malloc(bufferlen);
 	if (!buffer) {
 		lwsl_err("Out of memory\n");
 		return NULL;
@@ -353,6 +418,6 @@ lws_plat_inet_ntop(int af, const void *src, char *dst, int cnt)
 			ok = FALSE;
 	}
 
-	free(buffer);
+	lws_free(buffer);
 	return ok ? dst : NULL;
 }

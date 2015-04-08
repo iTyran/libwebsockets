@@ -50,16 +50,38 @@
 #include "private-libwebsockets.h"
 
 #ifndef LWS_NO_SERVER
+#ifdef LWS_OPENSSL_SUPPORT
 
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L
-static int alpn_select_proto_cb(SSL* ssl,
-                         const unsigned char **out,
-                         unsigned char *outlen,
-                         const unsigned char *in, unsigned int inlen,
-                         void *arg)
+
+struct alpn_ctx {
+	unsigned char *data;
+	unsigned short len;
+};
+
+static int npn_cb(SSL *s, const unsigned char **data, unsigned int *len, void *arg)
 {
-	lwsl_err((char *)in);
-	return SSL_TLSEXT_ERR_OK; /* SSL_TLSEXT_ERR_NOACK */
+	struct alpn_ctx *alpn_ctx = arg;
+
+	lwsl_info("%s\n", __func__);
+	*data = alpn_ctx->data;
+	*len = alpn_ctx->len;
+
+	return SSL_TLSEXT_ERR_OK;
+}
+
+static int alpn_cb(SSL *s, const unsigned char **out,
+		unsigned char *outlen, const unsigned char *in,
+		unsigned int inlen, void *arg)
+{
+	struct alpn_ctx *alpn_ctx = arg;
+
+	if (SSL_select_next_proto((unsigned char **)out, outlen,
+				  alpn_ctx->data, alpn_ctx->len, in, inlen) !=
+							OPENSSL_NPN_NEGOTIATED)
+		return SSL_TLSEXT_ERR_NOACK;
+
+	return SSL_TLSEXT_ERR_OK;
 }
 #endif
 
@@ -67,12 +89,66 @@ LWS_VISIBLE void
 lws_context_init_http2_ssl(struct libwebsocket_context *context)
 {
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L
+	static struct alpn_ctx protos = { (unsigned char *)
+						"\x05h2-14"
+						"\x08http/1.1",
+						6 + 9 };
+
+	SSL_CTX_set_next_protos_advertised_cb(context->ssl_ctx, npn_cb, &protos);
+	
 	// ALPN selection callback
-	SSL_CTX_set_alpn_select_cb(context->ssl_ctx, alpn_select_proto_cb, NULL);
+	SSL_CTX_set_alpn_select_cb(context->ssl_ctx, alpn_cb, &protos);
 	lwsl_notice(" HTTP2 / ALPN enabled\n");
 #else
-	lwsl_notice(" HTTP2 / ALPN configured but not supported by OpenSSL version\n");
+	lwsl_notice(
+		" HTTP2 / ALPN configured but not supported by OpenSSL 0x%x\n",
+		    OPENSSL_VERSION_NUMBER);
 #endif // OPENSSL_VERSION_NUMBER >= 0x10002000L
 }
 
+void lws_http2_configure_if_upgraded(struct libwebsocket *wsi)
+{
+#if OPENSSL_VERSION_NUMBER >= 0x10002000L
+	struct allocated_headers *ah;
+	const unsigned char *name;
+	unsigned len;
+	const char *method = "alpn";
+
+	SSL_get0_alpn_selected(wsi->ssl, &name, &len);
+	
+	if (!len) {
+		SSL_get0_next_proto_negotiated(wsi->ssl, &name, &len);
+		method = "npn";
+	}
+	
+	if (!len) {
+		lwsl_info("no npn/alpn upgrade\n");
+		return;
+	}
+
+	lwsl_info("negotiated %s using %s\n", name, method);
+	wsi->use_ssl = 1;
+	if (strncmp((char *)name, "http/1.1", 8) == 0)
+		return;
+		
+	/* http2 */
+
+	/* adopt the header info */
+
+	ah = wsi->u.hdr.ah;
+
+	lws_union_transition(wsi, LWS_CONNMODE_HTTP2_SERVING);
+	wsi->state = WSI_STATE_HTTP2_AWAIT_CLIENT_PREFACE;
+		
+	/* http2 union member has http union struct at start */
+	wsi->u.http.ah = ah;
+		
+	lws_http2_init(&wsi->u.http2.peer_settings);
+	lws_http2_init(&wsi->u.http2.my_settings);
+
+	/* HTTP2 union */
+#endif
+}
+
+#endif
 #endif

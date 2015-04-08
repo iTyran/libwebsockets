@@ -49,7 +49,6 @@
 #ifndef min
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #endif
-
 /*
  * We have to take care about parsing because the headers may be split
  * into multiple fragments.  They may contain unknown headers with arbitrary
@@ -66,8 +65,33 @@ libwebsocket_read(struct libwebsocket_context *context,
 	unsigned char *last_char;
 
 	switch (wsi->state) {
+#ifdef LWS_USE_HTTP2
+	case WSI_STATE_HTTP2_AWAIT_CLIENT_PREFACE:
+	case WSI_STATE_HTTP2_ESTABLISHED_PRE_SETTINGS:
+	case WSI_STATE_HTTP2_ESTABLISHED:
+		n = 0;
+		while (n < len) {
+			/*
+			 * we were accepting input but now we stopped doing so
+			 */
+			if (!(wsi->rxflow_change_to & LWS_RXFLOW_ALLOW)) {
+				lws_rxflow_cache(wsi, buf, n, len);
+
+				return 1;
+			}
+
+			/* account for what we're using in rxflow buffer */
+			if (wsi->rxflow_buffer)
+				wsi->rxflow_pos++;
+			if (lws_http2_parser(context, wsi, buf[n++]))
+				goto bail;
+		}
+		break;
+#endif
 http_new:
 	case WSI_STATE_HTTP:
+		wsi->hdr_parsing_completed = 0;
+		/* fallthru */
 	case WSI_STATE_HTTP_ISSUING_FILE:
 		wsi->state = WSI_STATE_HTTP_HEADERS;
 		wsi->u.hdr.parser_state = WSI_TOKEN_NAME_PART;
@@ -140,7 +164,10 @@ http_postbody:
 						goto bail;
 				}
 				goto http_complete;
-			}
+			} else
+				libwebsocket_set_timeout(wsi,
+					PENDING_TIMEOUT_HTTP_CONTENT,
+					AWAITING_TIMEOUT);
 		}
 		break;
 
@@ -171,16 +198,22 @@ read_ok:
 
 http_complete:
 	lwsl_debug("libwebsocket_read: http_complete\n");
-	/* Handle keep-alives, by preparing for a new request: */
+
+	/* Did the client want to keep the HTTP connection going? */
+
 	if (wsi->u.http.connection_type == HTTP_CONNECTION_KEEP_ALIVE) {
 		lwsl_debug("libwebsocket_read: keep-alive\n");
 		wsi->state = WSI_STATE_HTTP;
 		wsi->mode = LWS_CONNMODE_HTTP_SERVING;
-		/* We might be streaming HTTP content, so leave the connection open.*/
+
+		/* He asked for it to stay alive indefinitely */
 		libwebsocket_set_timeout(wsi, NO_PENDING_TIMEOUT, 0);
 
 		if (lws_allocate_header_table(wsi))
 			goto bail;
+
+		/* If we're (re)starting on headers, need other implied init */
+		wsi->u.hdr.ues = URIES_IDLE;
 
 		/* If we have more data, loop back around: */
 		if (len)

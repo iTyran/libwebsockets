@@ -78,7 +78,7 @@ struct ping {
 };
 
 struct per_session_data__ping {
-	unsigned long ping_index;
+	uint64_t ping_index;
 
 	struct ping ringbuffer[PING_RINGBUFFER_SIZE];
 	int ringbuffer_head;
@@ -110,7 +110,7 @@ callback_lws_mirror(struct libwebsocket_context * this,
 	struct timeval tv;
 	unsigned char *p;
 	int shift;
-	unsigned long l;
+	uint64_t l;
 	unsigned long iv;
 	int n;
 	int match = 0;
@@ -161,7 +161,7 @@ callback_lws_mirror(struct libwebsocket_context * this,
 		l = 0;
 
 		while (shift >= 0) {
-			l |= (*p++) << shift;
+			l |= ((uint64_t)*p++) << shift;
 			shift -= 8;
 		}
 
@@ -190,7 +190,8 @@ callback_lws_mirror(struct libwebsocket_context * this,
 
 			if (!flood)
 				fprintf(stderr, "%d bytes from %s: req=%ld "
-				      "time=(unknown)\n", (int)len, address, l);
+				      "time=(unknown)\n", (int)len, address,
+					(long)l);
 			else
 				fprintf(stderr, "\b \b");
 
@@ -211,7 +212,7 @@ callback_lws_mirror(struct libwebsocket_context * this,
 
 		if (!flood)
 			fprintf(stderr, "%d bytes from %s: req=%ld "
-				"time=%lu.%lums\n", (int)len, address, l,
+				"time=%lu.%lums\n", (int)len, address, (long)l,
 			       (iv - psd->ringbuffer[n].issue_timestamp) / 1000,
 			((iv - psd->ringbuffer[n].issue_timestamp) / 100) % 10);
 		else

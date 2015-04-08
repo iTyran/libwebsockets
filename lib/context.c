@@ -76,7 +76,9 @@ libwebsocket_create_context(struct lws_context_creation_info *info)
 {
 	struct libwebsocket_context *context = NULL;
 	char *p;
-
+#ifdef _WIN32
+	int i;
+#endif
 	int pid_daemon = get_daemonize_pid();
 
 	lwsl_notice("Initial logging level %d\n", log_level);
@@ -101,13 +103,11 @@ libwebsocket_create_context(struct lws_context_creation_info *info)
 	if (lws_plat_context_early_init())
 		return NULL;
 
-	context = (struct libwebsocket_context *)
-				malloc(sizeof(struct libwebsocket_context));
+	context = lws_zalloc(sizeof(struct libwebsocket_context));
 	if (!context) {
 		lwsl_err("No memory for websocket context\n");
 		return NULL;
 	}
-	memset(context, 0, sizeof(*context));
 
 	if (pid_daemon) {
 		context->started_with_parent = pid_daemon;
@@ -122,6 +122,10 @@ libwebsocket_create_context(struct lws_context_creation_info *info)
 	context->http_proxy_address[0] = '\0';
 	context->options = info->options;
 	context->iface = info->iface;
+	context->ka_time = info->ka_time;
+	context->ka_interval = info->ka_interval;
+	context->ka_probes = info->ka_probes;
+
 	/* to reduce this allocation, */
 	context->max_fds = getdtablesize();
 	lwsl_notice(" static allocation: %u + (%u x %u fds) = %u bytes\n",
@@ -134,33 +138,41 @@ libwebsocket_create_context(struct lws_context_creation_info *info)
 					sizeof(struct libwebsocket *)) *
 							     context->max_fds));
 
-	context->fds = (struct libwebsocket_pollfd *)
-				malloc(sizeof(struct libwebsocket_pollfd) *
-							      context->max_fds);
+	context->fds = lws_zalloc(sizeof(struct libwebsocket_pollfd) *
+				  context->max_fds);
 	if (context->fds == NULL) {
 		lwsl_err("Unable to allocate fds array for %d connections\n",
 							      context->max_fds);
-		free(context);
+		lws_free(context);
 		return NULL;
 	}
 
-	context->lws_lookup = (struct libwebsocket **)
-		      malloc(sizeof(struct libwebsocket *) * context->max_fds);
+#ifdef _WIN32
+	for (i = 0; i < FD_HASHTABLE_MODULUS; i++) {
+		context->fd_hashtable[i].wsi = lws_zalloc(sizeof(struct libwebsocket*) * context->max_fds);
+	}
+#else
+	context->lws_lookup = lws_zalloc(sizeof(struct libwebsocket *) * context->max_fds);
 	if (context->lws_lookup == NULL) {
 		lwsl_err(
 		  "Unable to allocate lws_lookup array for %d connections\n",
 							      context->max_fds);
-		free(context->fds);
-		free(context);
+		lws_free(context->fds);
+		lws_free(context);
 		return NULL;
 	}
-	memset(context->lws_lookup, 0, sizeof(struct libwebsocket *) *
-							context->max_fds);
+#endif
 
 	if (lws_plat_init_fd_tables(context)) {
-		free(context->lws_lookup);
-		free(context->fds);
-		free(context);
+#ifdef _WIN32
+		for (i = 0; i < FD_HASHTABLE_MODULUS; i++) {
+			lws_free(context->fd_hashtable[i].wsi);
+		}
+#else
+		lws_free(context->lws_lookup);
+#endif
+		lws_free(context->fds);
+		lws_free(context);
 		return NULL;
 	}
 
@@ -209,10 +221,10 @@ libwebsocket_create_context(struct lws_context_creation_info *info)
 		" per-conn mem: %u + %u headers + protocol rx buf\n",
 				sizeof(struct libwebsocket),
 					      sizeof(struct allocated_headers));
-		
+
 	if (lws_context_init_server_ssl(info, context))
 		goto bail;
-	
+
 	if (lws_context_init_client_ssl(info, context))
 		goto bail;
 
@@ -294,11 +306,11 @@ libwebsocket_context_destroy(struct libwebsocket_context *context)
 
 	for (n = 0; n < context->fds_count; n++) {
 		struct libwebsocket *wsi =
-					context->lws_lookup[context->fds[n].fd];
+					wsi_from_fd(context, context->fds[n].fd);
 		if (!wsi)
 			continue;
 		libwebsocket_close_and_free_session(context,
-			wsi, LWS_CLOSE_STATUS_NOSTATUS /* no protocol close */);
+			wsi, LWS_CLOSE_STATUS_NOSTATUS_CONTEXT_DESTROY /* no protocol close */);
 		n--;
 	}
 
@@ -306,7 +318,7 @@ libwebsocket_context_destroy(struct libwebsocket_context *context)
 	 * give all extensions a chance to clean up any per-context
 	 * allocations they might have made
 	 */
-	if (context->listen_port) {
+	if (context->listen_port != CONTEXT_PORT_NO_LISTEN) {
 		if (lws_ext_callback_for_each_extension_type(context, NULL,
 			 LWS_EXT_CALLBACK_SERVER_CONTEXT_DESTRUCT, NULL, 0) < 0)
 			return;
@@ -330,12 +342,15 @@ libwebsocket_context_destroy(struct libwebsocket_context *context)
 
 	lws_ssl_context_destroy(context);
 
-	if (context->fds)
-		free(context->fds);
-	if (context->lws_lookup)
-		free(context->lws_lookup);
-
+	lws_free(context->fds);
+#ifdef _WIN32
+	for (n = 0; n < FD_HASHTABLE_MODULUS; n++) {
+		lws_free(context->fd_hashtable[n].wsi);
+	}
+#else
+	lws_free(context->lws_lookup);
+#endif
 	lws_plat_context_late_destroy(context);
 
-	free(context);
+	lws_free(context);
 }

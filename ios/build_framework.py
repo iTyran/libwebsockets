@@ -113,8 +113,8 @@ def put_framework_together(srcroot, dstroot):
 def build_framework(srcroot, dstroot):
     "main function to do all the work"
 
-    targets = ["iPhoneOS", "iPhoneOS", "iPhoneSimulator"]
-    archs = ["armv7", "armv7s", "i386"]
+    targets = ["iPhoneOS", "iPhoneOS", "iPhoneOS", "iPhoneSimulator"]
+    archs = ["armv7", "armv7s", "arm64", "i386"]
     for i in range(len(targets)):
         build_opencv(srcroot, os.path.join(dstroot, "build"), targets[i], archs[i])
 
@@ -128,6 +128,7 @@ def build_framework(srcroot, dstroot):
         + build_root+"/iPhoneSimulator-i386"+lib_path
         + build_root+"/iPhoneOS-armv7"+lib_path
         + build_root+"/iPhoneOS-armv7s"+lib_path
+        + build_root+"/iPhoneOS-arm64"+lib_path
         )
     os.system(strip + "-S " + build_root+"/libwebsockets.a")
     os.system(lipo + "-info " + build_root+"/libwebsockets.a")

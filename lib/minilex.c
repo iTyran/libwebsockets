@@ -16,50 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* set of parsable strings -- ALL LOWER CASE */
-
-const char *set[] = {
-	"get ",
-	"post ",
-	"options ",
-	"host:",
-	"connection:",
-	"sec-websocket-key1:",
-	"sec-websocket-key2:",
-	"sec-websocket-protocol:",
-	"upgrade:",
-	"origin:",
-	"sec-websocket-draft:",
-	"\x0d\x0a",
-
-	"sec-websocket-key:",
-	"sec-websocket-version:",
-	"sec-websocket-origin:",
-
-	"sec-websocket-extensions:",
-
-	"sec-websocket-accept:",
-	"sec-websocket-nonce:",
-	"http/1.1 ",
-
-	"accept:",
-	"access-control-request-headers:",
-	"if-modified-since:",
-	"if-none-match:",
-	"accept-encoding:",
-	"accept-language:",
-	"pragma:",
-	"cache-control:",
-	"authorization:",
-	"cookie:",
-	"content-length:",
-	"content-type:",
-	"date:",
-	"range:",
-	"referer:",
-	"", /* not matchable */
-
-};
+#include "lextable-strings.h"
 
 /*
  * b7 = 0 = 1-byte seq
