@@ -20,36 +20,9 @@
  */
 
 #include "private-libwebsockets.h"
- #include <openssl/err.h>
 
 int openssl_websocket_private_data_index;
 
-static int lws_context_init_ssl_pem_passwd_cb(char * buf, int size, int rwflag, void *userdata)
-{
-	struct lws_context_creation_info * info = (struct lws_context_creation_info *)userdata;
-
-	strncpy(buf, info->ssl_private_key_password, size);
-	buf[size - 1] = '\0';
-
-	return strlen(buf);
-}
-
-static void lws_ssl_bind_passphrase(SSL_CTX *ssl_ctx,
-				    struct lws_context_creation_info *info)
-{
-	if (!info->ssl_private_key_password)
-		return;
-	/*
-	 * password provided, set ssl callback and user data
-	 * for checking password which will be trigered during
-	 * SSL_CTX_use_PrivateKey_file function
-	 */
-	SSL_CTX_set_default_passwd_cb_userdata(ssl_ctx, (void *)info);
-	SSL_CTX_set_default_passwd_cb(ssl_ctx,
-				      lws_context_init_ssl_pem_passwd_cb);
-}
-
-#ifndef LWS_NO_SERVER
 static int
 OpenSSL_verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx)
 {
@@ -82,10 +55,11 @@ lws_context_init_server_ssl(struct lws_context_creation_info *info,
 	int error;
 	int n;
 
+#ifndef LWS_NO_SERVER
 	if (info->port != CONTEXT_PORT_NO_LISTEN) {
 
-		context->use_ssl = info->ssl_cert_filepath != NULL;
-
+		context->use_ssl = info->ssl_cert_filepath != NULL &&
+					 info->ssl_private_key_filepath != NULL;
 #ifdef USE_CYASSL
 		lwsl_notice(" Compiled with CYASSL support\n");
 #else
@@ -101,6 +75,16 @@ lws_context_init_server_ssl(struct lws_context_creation_info *info,
 			lwsl_notice(" Using non-SSL mode\n");
 	}
 
+#else
+		if (info->ssl_cert_filepath != NULL &&
+				       info->ssl_private_key_filepath != NULL) {
+			lwsl_notice(" Not compiled for OpenSSl support!\n");
+			return 1;
+		}
+		lwsl_notice(" Compiled without SSL support\n");
+	}
+#endif /* no server */
+
 	/* basic openssl init */
 
 	SSL_library_init();
@@ -114,10 +98,6 @@ lws_context_init_server_ssl(struct lws_context_creation_info *info,
 	/*
 	 * Firefox insists on SSLv23 not SSLv3
 	 * Konq disables SSLv2 by default now, SSLv23 works
-	 *
-	 * SSLv23_server_method() is the openssl method for "allow all TLS
-	 * versions", compared to e.g. TLSv1_2_server_method() which only allows
-	 * tlsv1.2. Unwanted versions must be disabled using SSL_CTX_set_options()
 	 */
 
 	method = (SSL_METHOD *)SSLv23_server_method();
@@ -137,8 +117,6 @@ lws_context_init_server_ssl(struct lws_context_creation_info *info,
 		return 1;
 	}
 
-	/* Disable SSLv2 and SSLv3 */
-	SSL_CTX_set_options(context->ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
 #ifdef SSL_OP_NO_COMPRESSION
 	SSL_CTX_set_options(context->ssl_ctx, SSL_OP_NO_COMPRESSION);
 #endif
@@ -189,31 +167,18 @@ lws_context_init_server_ssl(struct lws_context_creation_info *info,
 					      (char *)context->service_buffer));
 			return 1;
 		}
-		lws_ssl_bind_passphrase(context->ssl_ctx, info);
-
-		if (info->ssl_private_key_filepath != NULL) {
-			/* set the private key from KeyFile */
-			if (SSL_CTX_use_PrivateKey_file(context->ssl_ctx,
-				     info->ssl_private_key_filepath,
+		/* set the private key from KeyFile */
+		if (SSL_CTX_use_PrivateKey_file(context->ssl_ctx,
+			     info->ssl_private_key_filepath,
 						       SSL_FILETYPE_PEM) != 1) {
-				error = ERR_get_error();
-				lwsl_err("ssl problem getting key '%s' %lu: %s\n",
-					info->ssl_private_key_filepath,
-						error,
-						ERR_error_string(error,
-						      (char *)context->service_buffer));
-				return 1;
-			}
+			error = ERR_get_error();
+			lwsl_err("ssl problem getting key '%s' %lu: %s\n",
+				info->ssl_private_key_filepath,
+					error,
+					ERR_error_string(error,
+					      (char *)context->service_buffer));
+			return 1;
 		}
-		else {
-			if (context->protocols[0].callback(context, NULL,
-				LWS_CALLBACK_OPENSSL_CONTEXT_REQUIRES_PRIVATE_KEY,
-						context->ssl_ctx, NULL, 0)) {
-				lwsl_err("ssl private key not set\n");
-				return 1;
-			}
-		}
-
 		/* verify private key */
 		if (!SSL_CTX_check_private_key(context->ssl_ctx)) {
 			lwsl_err("Private SSL key doesn't match cert\n");
@@ -230,21 +195,16 @@ lws_context_init_server_ssl(struct lws_context_creation_info *info,
 	
 	return 0;
 }
-#endif
 
 LWS_VISIBLE void
 lws_ssl_destroy(struct libwebsocket_context *context)
 {
 	if (context->ssl_ctx)
 		SSL_CTX_free(context->ssl_ctx);
-	if (!context->user_supplied_ssl_ctx && context->ssl_client_ctx)
+	if (context->ssl_client_ctx)
 		SSL_CTX_free(context->ssl_client_ctx);
 
-#if (OPENSSL_VERSION_NUMBER < 0x01000000) || defined(USE_CYASSL)
 	ERR_remove_state(0);
-#else
-	ERR_remove_thread_state(NULL);
-#endif
 	ERR_free_strings();
 	EVP_cleanup();
 	CRYPTO_cleanup_all_ex_data();
@@ -263,7 +223,6 @@ libwebsockets_decode_ssl_error(void)
 }
 
 #ifndef LWS_NO_CLIENT
-
 int lws_context_init_client_ssl(struct lws_context_creation_info *info,
 			    struct libwebsocket_context *context)
 {
@@ -271,23 +230,8 @@ int lws_context_init_client_ssl(struct lws_context_creation_info *info,
 	int n;
 	SSL_METHOD *method;
 
-	if (info->provided_client_ssl_ctx) {
-		/* use the provided OpenSSL context if given one */
-		context->ssl_client_ctx = info->provided_client_ssl_ctx;
-		/* nothing for lib to delete */
-		context->user_supplied_ssl_ctx = 1;
-		return 0;
-	}
-
 	if (info->port != CONTEXT_PORT_NO_LISTEN)
 		return 0;
-
-	/* basic openssl init */
-
-	SSL_library_init();
-
-	OpenSSL_add_all_algorithms();
-	SSL_load_error_strings();
 
 	method = (SSL_METHOD *)SSLv23_client_method();
 	if (!method) {
@@ -341,8 +285,6 @@ int lws_context_init_client_ssl(struct lws_context_creation_info *info,
 				"Unable to load SSL Client certs "
 				"file from %s -- client ssl isn't "
 				"going to work", info->ssl_ca_filepath);
-		else
-			lwsl_info("loaded ssl_ca_filepath\n");
 
 	/*
 	 * callback allowing user code to load extra verification certs
@@ -364,10 +306,10 @@ int lws_context_init_client_ssl(struct lws_context_creation_info *info,
 		}
 	} 
 	if (info->ssl_private_key_filepath) {
-		lws_ssl_bind_passphrase(context->ssl_client_ctx, info);
 		/* set the private key from KeyFile */
 		if (SSL_CTX_use_PrivateKey_file(context->ssl_client_ctx,
-		    info->ssl_private_key_filepath, SSL_FILETYPE_PEM) != 1) {
+			     info->ssl_private_key_filepath,
+					       SSL_FILETYPE_PEM) != 1) {
 			lwsl_err("use_PrivateKey_file '%s' %lu: %s\n",
 				info->ssl_private_key_filepath,
 				ERR_get_error(),
@@ -392,64 +334,18 @@ int lws_context_init_client_ssl(struct lws_context_creation_info *info,
 }
 #endif
 
-LWS_VISIBLE void
-lws_ssl_remove_wsi_from_buffered_list(struct libwebsocket_context *context,
-		     struct libwebsocket *wsi)
-{
-	if (!wsi->pending_read_list_prev &&
-	    !wsi->pending_read_list_next &&
-	    context->pending_read_list != wsi)
-		/* we are not on the list */
-		return;
-
-	/* point previous guy's next to our next */
-	if (!wsi->pending_read_list_prev)
-		context->pending_read_list = wsi->pending_read_list_next;
-	else
-		wsi->pending_read_list_prev->pending_read_list_next =
-			wsi->pending_read_list_next;
-
-	/* point next guy's previous to our previous */
-	if (wsi->pending_read_list_next)
-		wsi->pending_read_list_next->pending_read_list_prev =
-			wsi->pending_read_list_prev;
-
-	wsi->pending_read_list_prev = NULL;
-	wsi->pending_read_list_next = NULL;
-}
-
 LWS_VISIBLE int
-lws_ssl_capable_read(struct libwebsocket_context *context,
-		     struct libwebsocket *wsi, unsigned char *buf, int len)
+lws_ssl_capable_read(struct libwebsocket *wsi, unsigned char *buf, int len)
 {
 	int n;
 
 	if (!wsi->ssl)
-		return lws_ssl_capable_read_no_ssl(context, wsi, buf, len);
+		return lws_ssl_capable_read_no_ssl(wsi, buf, len);
 
 	n = SSL_read(wsi->ssl, buf, len);
-	if (n >= 0) {
-		/* 
-		 * if it was our buffer that limited what we read,
-		 * check if SSL has additional data pending inside SSL buffers.
-		 * 
-		 * Because these won't signal at the network layer with POLLIN
-		 * and if we don't realize, this data will sit there forever
-		 */
-		if (n == len && wsi->ssl && SSL_pending(wsi->ssl)) {
-			if (!wsi->pending_read_list_next && !wsi->pending_read_list_prev) {
-				/* add us to the linked list of guys with pending ssl */
-				if (context->pending_read_list)
-					context->pending_read_list->pending_read_list_prev = wsi;
-				wsi->pending_read_list_next = context->pending_read_list;
-				wsi->pending_read_list_prev = NULL;
-				context->pending_read_list = wsi;
-			}
-		} else
-			lws_ssl_remove_wsi_from_buffered_list(context, wsi);
-
+	if (n >= 0)
 		return n;
-	}
+
 	n = SSL_get_error(wsi->ssl, n);
 	if (n ==  SSL_ERROR_WANT_READ || n ==  SSL_ERROR_WANT_WRITE)
 		return LWS_SSL_CAPABLE_MORE_SERVICE;
@@ -477,6 +373,14 @@ lws_ssl_capable_write(struct libwebsocket *wsi, unsigned char *buf, int len)
 	}
 
 	return LWS_SSL_CAPABLE_ERROR;
+}
+
+LWS_VISIBLE int
+lws_ssl_pending(struct libwebsocket *wsi)
+{
+	if (wsi->ssl)
+		return SSL_pending(wsi->ssl);
+	return 0;
 }
 
 LWS_VISIBLE int
@@ -512,18 +416,13 @@ lws_server_socket_service_ssl(struct libwebsocket_context *context,
 	switch (wsi->mode) {
 	case LWS_CONNMODE_SERVER_LISTENER:
 
-		if (!new_wsi) {
-			lwsl_err("no new_wsi\n");
-			return 0;
-		}
-
 		new_wsi->ssl = SSL_new(context->ssl_ctx);
 		if (new_wsi->ssl == NULL) {
 			lwsl_err("SSL_new failed: %s\n",
 			    ERR_error_string(SSL_get_error(
 			    new_wsi->ssl, 0), NULL));
 			    libwebsockets_decode_ssl_error();
-			lws_free(new_wsi);
+			free(new_wsi);
 			compatible_close(accept_fd);
 			break;
 		}
@@ -635,7 +534,9 @@ lws_server_socket_service_ssl(struct libwebsocket_context *context,
 		}
 		lwsl_debug("SSL_accept failed skt %u: %s\n",
 					 pollfd->fd, ERR_error_string(m, NULL));
-		goto fail;
+		libwebsocket_close_and_free_session(context, wsi,
+						     LWS_CLOSE_STATUS_NOSTATUS);
+		break;
 
 accepted:
 		/* OK, we are accepted... give him some time to negotiate */
@@ -644,8 +545,6 @@ accepted:
 							AWAITING_TIMEOUT);
 
 		wsi->mode = LWS_CONNMODE_HTTP_SERVING;
-
-		lws_http2_configure_if_upgraded(wsi);
 
 		lwsl_debug("accepted new SSL conn\n");
 		break;
@@ -662,14 +561,10 @@ lws_ssl_context_destroy(struct libwebsocket_context *context)
 {
 	if (context->ssl_ctx)
 		SSL_CTX_free(context->ssl_ctx);
-	if (!context->user_supplied_ssl_ctx && context->ssl_client_ctx)
+	if (context->ssl_client_ctx)
 		SSL_CTX_free(context->ssl_client_ctx);
 
-#if (OPENSSL_VERSION_NUMBER < 0x01000000) || defined(USE_CYASSL)
 	ERR_remove_state(0);
-#else
-	ERR_remove_thread_state(NULL);
-#endif
 	ERR_free_strings();
 	EVP_cleanup();
 	CRYPTO_cleanup_all_ex_data();
