@@ -57,11 +57,8 @@ int lws_context_init_server(struct lws_context_creation_info *info,
 	/*
 	 * allow us to restart even if old sockets in TIME_WAIT
 	 */
-	if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR,
-				      (const void *)&opt, sizeof(opt)) < 0) {
-		compatible_close(sockfd);
-		return 1;
-	}
+	setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR,
+				      (const void *)&opt, sizeof(opt));
 
 	lws_plat_set_socket_options(context, sockfd);
 
@@ -102,7 +99,7 @@ int lws_context_init_server(struct lws_context_creation_info *info,
 		compatible_close(sockfd);
 		return 1;
 	}
-
+	
 	if (getsockname(sockfd, (struct sockaddr *)&sin, &len) == -1)
 		lwsl_warn("getsockname: %s\n", strerror(LWS_ERRNO));
 	else
@@ -110,12 +107,13 @@ int lws_context_init_server(struct lws_context_creation_info *info,
 
 	context->listen_port = info->port;
 
-	wsi = lws_zalloc(sizeof(struct libwebsocket));
+	wsi = (struct libwebsocket *)malloc(sizeof(struct libwebsocket));
 	if (wsi == NULL) {
 		lwsl_err("Out of mem\n");
 		compatible_close(sockfd);
 		return 1;
 	}
+	memset(wsi, 0, sizeof(struct libwebsocket));
 	wsi->sock = sockfd;
 	wsi->mode = LWS_CONNMODE_SERVER_LISTENER;
 
@@ -127,7 +125,7 @@ int lws_context_init_server(struct lws_context_creation_info *info,
 
 	listen(sockfd, LWS_SOMAXCONN);
 	lwsl_notice(" Listening on port %d\n", info->port);
-
+	
 	return 0;
 }
 
@@ -137,11 +135,11 @@ _libwebsocket_rx_flow_control(struct libwebsocket *wsi)
 	struct libwebsocket_context *context = wsi->protocol->owning_server;
 
 	/* there is no pending change */
-	if (!(wsi->rxflow_change_to & LWS_RXFLOW_PENDING_CHANGE))
+	if (!(wsi->u.ws.rxflow_change_to & LWS_RXFLOW_PENDING_CHANGE))
 		return 0;
 
 	/* stuff is still buffered, not ready to really accept new input */
-	if (wsi->rxflow_buffer) {
+	if (wsi->u.ws.rxflow_buffer) {
 		/* get ourselves called back to deal with stashed buffer */
 		libwebsocket_callback_on_writable(context, wsi);
 		return 0;
@@ -149,14 +147,14 @@ _libwebsocket_rx_flow_control(struct libwebsocket *wsi)
 
 	/* pending is cleared, we can change rxflow state */
 
-	wsi->rxflow_change_to &= ~LWS_RXFLOW_PENDING_CHANGE;
+	wsi->u.ws.rxflow_change_to &= ~LWS_RXFLOW_PENDING_CHANGE;
 
 	lwsl_info("rxflow: wsi %p change_to %d\n", wsi,
-			      wsi->rxflow_change_to & LWS_RXFLOW_ALLOW);
+			      wsi->u.ws.rxflow_change_to & LWS_RXFLOW_ALLOW);
 
 	/* adjust the pollfd for this wsi */
 
-	if (wsi->rxflow_change_to & LWS_RXFLOW_ALLOW) {
+	if (wsi->u.ws.rxflow_change_to & LWS_RXFLOW_ALLOW) {
 		if (lws_change_pollfd(wsi, 0, LWS_POLLIN)) {
 			lwsl_info("%s: fail\n", __func__);
 			return -1;
@@ -168,171 +166,15 @@ _libwebsocket_rx_flow_control(struct libwebsocket *wsi)
 	return 0;
 }
 
-int lws_http_action(struct libwebsocket_context *context,
-		    struct libwebsocket *wsi)
-{
-	char *uri_ptr = NULL;
-	int uri_len = 0;
-	enum http_version request_version;
-	enum http_connection_type connection_type;
-	int http_version_len;
-	char content_length_str[32];
-	char http_version_str[10];
-	char http_conn_str[20];
-	int n, count = 0;
-	static const unsigned char methods[] = {
-		WSI_TOKEN_GET_URI,
-		WSI_TOKEN_POST_URI,
-		WSI_TOKEN_OPTIONS_URI,
-		WSI_TOKEN_PUT_URI,
-		WSI_TOKEN_PATCH_URI,
-		WSI_TOKEN_DELETE_URI,
-#ifdef LWS_USE_HTTP2
-		WSI_TOKEN_HTTP_COLON_PATH,
-#endif
-	};
-#ifdef _DEBUG
-	static const char * const method_names[] = {
-		"GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE",
-#ifdef LWS_USE_HTTP2
-		":path",
-#endif
-	};
-#endif
-	
-	/* it's not websocket.... shall we accept it as http? */
-
-	for (n = 0; n < ARRAY_SIZE(methods); n++)
-		if (lws_hdr_total_length(wsi, methods[n]))
-			count++;
-	if (!count) {
-		lwsl_warn("Missing URI in HTTP request\n");
-		goto bail_nuke_ah;
-	}
-
-	if (count != 1) {
-		lwsl_warn("multiple methods?\n");
-		goto bail_nuke_ah;
-	}
-
-	if (libwebsocket_ensure_user_space(wsi))
-		goto bail_nuke_ah;
-
-	for (n = 0; n < ARRAY_SIZE(methods); n++)
-		if (lws_hdr_total_length(wsi, methods[n])) {
-			uri_ptr = lws_hdr_simple_ptr(wsi, methods[n]);
-			uri_len = lws_hdr_total_length(wsi, methods[n]);
-			lwsl_info("Method: %s request for '%s'\n",
-				  	method_names[n], uri_ptr);
-			break;
-		}
-
-	/* HTTP header had a content length? */
-
-	wsi->u.http.content_length = 0;
-	if (lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI) ||
-		lws_hdr_total_length(wsi, WSI_TOKEN_PATCH_URI) ||
-		lws_hdr_total_length(wsi, WSI_TOKEN_PUT_URI))
-		wsi->u.http.content_length = 100 * 1024 * 1024;
-
-	if (lws_hdr_total_length(wsi, WSI_TOKEN_HTTP_CONTENT_LENGTH)) {
-		lws_hdr_copy(wsi, content_length_str,
-				sizeof(content_length_str) - 1,
-						WSI_TOKEN_HTTP_CONTENT_LENGTH);
-		wsi->u.http.content_length = atoi(content_length_str);
-	}
-
-	/* http_version? Default to 1.0, override with token: */
-	request_version = HTTP_VERSION_1_0;
-
-	/* Works for single digit HTTP versions. : */
-	http_version_len = lws_hdr_total_length(wsi, WSI_TOKEN_HTTP);
-	if (http_version_len > 7) {
-		lws_hdr_copy(wsi, http_version_str,
-				sizeof(http_version_str) - 1, WSI_TOKEN_HTTP);
-		if (http_version_str[5] == '1' && http_version_str[7] == '1')
-			request_version = HTTP_VERSION_1_1;
-	}
-	wsi->u.http.request_version = request_version;
-
-	/* HTTP/1.1 defaults to "keep-alive", 1.0 to "close" */
-	if (request_version == HTTP_VERSION_1_1)
-		connection_type = HTTP_CONNECTION_KEEP_ALIVE;
-	else
-		connection_type = HTTP_CONNECTION_CLOSE;
-
-	/* Override default if http "Connection:" header: */
-	if (lws_hdr_total_length(wsi, WSI_TOKEN_CONNECTION)) {
-		lws_hdr_copy(wsi, http_conn_str, sizeof(http_conn_str) - 1,
-			     WSI_TOKEN_CONNECTION);
-		http_conn_str[sizeof(http_conn_str) - 1] = '\0';
-		if (!strcasecmp(http_conn_str, "keep-alive"))
-			connection_type = HTTP_CONNECTION_KEEP_ALIVE;
-		else
-			if (strcasecmp(http_conn_str, "close"))
-				connection_type = HTTP_CONNECTION_CLOSE;
-	}
-	wsi->u.http.connection_type = connection_type;
-
-	n = 0;
-	if (wsi->protocol->callback)
-		n = wsi->protocol->callback(context, wsi,
-					LWS_CALLBACK_FILTER_HTTP_CONNECTION,
-					     wsi->user_space, uri_ptr, uri_len);
-
-	if (!n) {
-		/*
-		 * if there is content supposed to be coming,
-		 * put a timeout on it having arrived
-		 */
-		libwebsocket_set_timeout(wsi, PENDING_TIMEOUT_HTTP_CONTENT,
-							      AWAITING_TIMEOUT);
-
-		if (wsi->protocol->callback)
-			n = wsi->protocol->callback(context, wsi,
-			    LWS_CALLBACK_HTTP,
-			    wsi->user_space, uri_ptr, uri_len);
-	}
-
-	/* now drop the header info we kept a pointer to */
-	lws_free2(wsi->u.http.ah);
-
-	if (n) {
-		lwsl_info("LWS_CALLBACK_HTTP closing\n");
-		return 1; /* struct ah ptr already nuked */		}
-
-	/* 
-	 * If we're not issuing a file, check for content_length or
-	 * HTTP keep-alive. No keep-alive header allocation for
-	 * ISSUING_FILE, as this uses HTTP/1.0. 
-	 * 
-	 * In any case, return 0 and let libwebsocket_read decide how to
-	 * proceed based on state
-	 */
-	if (wsi->state != WSI_STATE_HTTP_ISSUING_FILE)
-		/* Prepare to read body if we have a content length: */
-		if (wsi->u.http.content_length > 0)
-			wsi->state = WSI_STATE_HTTP_BODY;
-
-	return 0;
-
-bail_nuke_ah:
-	/* drop the header info */
-	lws_free2(wsi->u.hdr.ah);
-
-	return 1;
-}
-
 
 int lws_handshake_server(struct libwebsocket_context *context,
 		struct libwebsocket *wsi, unsigned char **buf, size_t len)
 {
 	struct allocated_headers *ah;
-	int protocol_len;
-	char protocol_list[128];
-	char protocol_name[32];
-	char *p;
-	int n, hit;
+	char *uri_ptr = NULL;
+	int uri_len = 0;
+	char content_length_str[32];
+	int n;
 
 	/* LWS_CONNMODE_WS_SERVING */
 
@@ -354,148 +196,166 @@ int lws_handshake_server(struct libwebsocket_context *context,
 
 		if (!lws_hdr_total_length(wsi, WSI_TOKEN_UPGRADE) ||
 			     !lws_hdr_total_length(wsi, WSI_TOKEN_CONNECTION)) {
-			
+
+			/* it's not websocket.... shall we accept it as http? */
+
+			if (!lws_hdr_total_length(wsi, WSI_TOKEN_GET_URI) &&
+				!lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI) &&
+				!lws_hdr_total_length(wsi, WSI_TOKEN_OPTIONS_URI)) {
+				lwsl_warn("Missing URI in HTTP request\n");
+				goto bail_nuke_ah;
+			}
+
+			if (lws_hdr_total_length(wsi, WSI_TOKEN_GET_URI) &&
+				lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI)) {
+				lwsl_warn("GET and POST methods?\n");
+				goto bail_nuke_ah;
+			}
+
+			if (libwebsocket_ensure_user_space(wsi))
+				goto bail_nuke_ah;
+
+			if (lws_hdr_total_length(wsi, WSI_TOKEN_GET_URI)) {
+				uri_ptr = lws_hdr_simple_ptr(wsi, WSI_TOKEN_GET_URI);
+				uri_len = lws_hdr_total_length(wsi, WSI_TOKEN_GET_URI);
+				lwsl_info("HTTP GET request for '%s'\n",
+				    lws_hdr_simple_ptr(wsi, WSI_TOKEN_GET_URI));
+
+			}
+			if (lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI)) {
+				lwsl_info("HTTP POST request for '%s'\n",
+				   lws_hdr_simple_ptr(wsi, WSI_TOKEN_POST_URI));
+				uri_ptr = lws_hdr_simple_ptr(wsi, WSI_TOKEN_POST_URI);
+				uri_len = lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI);
+			}
+			if (lws_hdr_total_length(wsi, WSI_TOKEN_OPTIONS_URI)) {
+				lwsl_info("HTTP OPTIONS request for '%s'\n",
+				   lws_hdr_simple_ptr(wsi, WSI_TOKEN_OPTIONS_URI));
+				uri_ptr = lws_hdr_simple_ptr(wsi, WSI_TOKEN_OPTIONS_URI);
+				uri_len = lws_hdr_total_length(wsi, WSI_TOKEN_OPTIONS_URI);
+			}
+
+			/*
+			 * Hm we still need the headers so the
+			 * callback can look at leaders like the URI, but we
+			 * need to transition to http union state.... hold a
+			 * copy of u.hdr.ah and deallocate afterwards
+			 */
 			ah = wsi->u.hdr.ah;
-			
-			lws_union_transition(wsi, LWS_CONNMODE_HTTP_SERVING_ACCEPTED);
+
+			/* union transition */
+			memset(&wsi->u, 0, sizeof(wsi->u));
+			wsi->mode = LWS_CONNMODE_HTTP_SERVING_ACCEPTED;
 			wsi->state = WSI_STATE_HTTP;
 			wsi->u.http.fd = LWS_INVALID_FILE;
 
 			/* expose it at the same offset as u.hdr */
 			wsi->u.http.ah = ah;
-			
-			n = lws_http_action(context, wsi);
 
-			return n;
+			/* HTTP header had a content length? */
+
+			wsi->u.http.content_length = 0;
+			if (lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI))
+				wsi->u.http.content_length = 100 * 1024 * 1024;
+
+			if (lws_hdr_total_length(wsi, WSI_TOKEN_HTTP_CONTENT_LENGTH)) {
+				lws_hdr_copy(wsi, content_length_str,
+						sizeof(content_length_str) - 1,
+								WSI_TOKEN_HTTP_CONTENT_LENGTH);
+				wsi->u.http.content_length = atoi(content_length_str);
+			}
+
+			if (wsi->u.http.content_length > 0) {
+				wsi->u.http.body_index = 0;
+				n = wsi->protocol->rx_buffer_size;
+				if (!n)
+					n = LWS_MAX_SOCKET_IO_BUF;
+				wsi->u.http.post_buffer = malloc(n);
+				if (!wsi->u.http.post_buffer) {
+					lwsl_err("Unable to allocate post buffer\n");
+					n = -1;
+					goto cleanup;
+				}
+			}
+
+			n = 0;
+			if (wsi->protocol->callback)
+				n = wsi->protocol->callback(context, wsi,
+					LWS_CALLBACK_FILTER_HTTP_CONNECTION,
+					     wsi->user_space, uri_ptr, uri_len);
+
+			if (!n) {
+				/*
+				 * if there is content supposed to be coming,
+				 * put a timeout on it having arrived
+				 */
+				libwebsocket_set_timeout(wsi,
+					PENDING_TIMEOUT_HTTP_CONTENT,
+							      AWAITING_TIMEOUT);
+
+				if (wsi->protocol->callback)
+					n = wsi->protocol->callback(context, wsi,
+					    LWS_CALLBACK_HTTP,
+					    wsi->user_space, uri_ptr, uri_len);
+			}
+
+cleanup:
+			/* now drop the header info we kept a pointer to */
+			if (ah)
+				free(ah);
+			/* not possible to continue to use past here */
+			wsi->u.http.ah = NULL;
+
+			if (n) {
+				lwsl_info("LWS_CALLBACK_HTTP closing\n");
+				return 1; /* struct ah ptr already nuked */
+			}
+
+			/*
+			 * (if callback didn't start sending a file)
+			 * deal with anything else as body, whether
+			 * there was a content-length or not
+			 */
+
+			if (wsi->state != WSI_STATE_HTTP_ISSUING_FILE)
+				wsi->state = WSI_STATE_HTTP_BODY;
+			return 2; /* goto http_postbody; */
 		}
 
-		if (!strcasecmp(lws_hdr_simple_ptr(wsi, WSI_TOKEN_UPGRADE),
-								"websocket"))
-			goto upgrade_ws;
-#ifdef LWS_USE_HTTP2
-		if (!strcasecmp(lws_hdr_simple_ptr(wsi, WSI_TOKEN_UPGRADE),
-								"h2c-14"))
-			goto upgrade_h2c;
-#endif
-		/* dunno what he wanted to upgrade to */
-		goto bail_nuke_ah;
-
-#ifdef LWS_USE_HTTP2
-upgrade_h2c:
-		if (!lws_hdr_total_length(wsi, WSI_TOKEN_HTTP2_SETTINGS)) {
-			lwsl_err("missing http2_settings\n");
-			goto bail_nuke_ah;
-		}
-
-		lwsl_err("h2c upgrade...\n");
-
-		p = lws_hdr_simple_ptr(wsi, WSI_TOKEN_HTTP2_SETTINGS);
-		/* convert the peer's HTTP-Settings */
-		n = lws_b64_decode_string(p, protocol_list, sizeof(protocol_list));
-		if (n < 0) {
-			lwsl_parser("HTTP2_SETTINGS too long\n");
-			return 1;
-		}
-
-		/* adopt the header info */
-
-		ah = wsi->u.hdr.ah;
-
-		lws_union_transition(wsi, LWS_CONNMODE_HTTP2_SERVING);
-		
-		/* http2 union member has http union struct at start */
-		wsi->u.http.ah = ah;
-		
-		lws_http2_init(&wsi->u.http2.peer_settings);
-		lws_http2_init(&wsi->u.http2.my_settings);
-		
-		/* HTTP2 union */
-		
-		lws_http2_interpret_settings_payload(&wsi->u.http2.peer_settings, (unsigned char *)protocol_list, n);
-
-		strcpy(protocol_list,
-		       "HTTP/1.1 101 Switching Protocols\x0d\x0a"
-		      "Connection: Upgrade\x0d\x0a"
-		      "Upgrade: h2c\x0d\x0a\x0d\x0a");
-		n = lws_issue_raw(wsi, (unsigned char *)protocol_list,
-					strlen(protocol_list));
-		if (n != strlen(protocol_list)) {
-			lwsl_debug("http2 switch: ERROR writing to socket\n");
-			return 1;
-		}
-		
-		wsi->state = WSI_STATE_HTTP2_AWAIT_CLIENT_PREFACE;
-		
-		return 0;
-#endif
-
-upgrade_ws:
 		if (!wsi->protocol)
 			lwsl_err("NULL protocol at libwebsocket_read\n");
 
 		/*
 		 * It's websocket
 		 *
-		 * Select the first protocol we support from the list
-		 * the client sent us.
-		 *
-		 * Copy it to remove header fragmentation
+		 * Make sure user side is happy about protocol
 		 */
 
-		if (lws_hdr_copy(wsi, protocol_list, sizeof(protocol_list) - 1,
-				 WSI_TOKEN_PROTOCOL) < 0) {
-			lwsl_err("protocol list too long");
-			goto bail_nuke_ah;
-		}
+		while (wsi->protocol->callback) {
 
-		protocol_len = lws_hdr_total_length(wsi, WSI_TOKEN_PROTOCOL);
-		protocol_list[protocol_len] = '\0';
-		p = protocol_list;
-		hit = 0;
-
-		while (*p && !hit) {
-			n = 0;
-			while (n < sizeof(protocol_name) - 1 && *p && *p !=',')
-				protocol_name[n++] = *p++;
-			protocol_name[n] = '\0';
-			if (*p)
-				p++;
-
-			lwsl_info("checking %s\n", protocol_name);
-
-			n = 0;
-			while (wsi->protocol && context->protocols[n].callback) {
-				if (!wsi->protocol->name) {
-					n++;
-					continue;
-				}
-				if (!strcmp(context->protocols[n].name,
-					    protocol_name)) {
-					lwsl_info("prot match %d\n", n);
-					wsi->protocol = &context->protocols[n];
-					hit = 1;
+			if (!lws_hdr_total_length(wsi, WSI_TOKEN_PROTOCOL)) {
+				if (wsi->protocol->name == NULL)
 					break;
-				}
+			} else
+				if (wsi->protocol->name && strcmp(
+					lws_hdr_simple_ptr(wsi,
+						WSI_TOKEN_PROTOCOL),
+						      wsi->protocol->name) == 0)
+					break;
 
-				n++;
-			}
+			wsi->protocol++;
 		}
 
 		/* we didn't find a protocol he wanted? */
 
-		if (!hit) {
+		if (wsi->protocol->callback == NULL) {
 			if (lws_hdr_simple_ptr(wsi, WSI_TOKEN_PROTOCOL) ==
 									 NULL) {
-				/*
-				 * some clients only have one protocol and
-				 * do not sent the protocol list header...
-				 * allow it and match to protocol 0
-				 */
-				lwsl_info("defaulting to prot 0 handler\n");
+				lwsl_info("no protocol -> prot 0 handler\n");
 				wsi->protocol = &context->protocols[0];
 			} else {
-				lwsl_err("No protocol from list \"%s\" supported\n",
-					 protocol_list);
+				lwsl_err("Req protocol %s not supported\n",
+				   lws_hdr_simple_ptr(wsi, WSI_TOKEN_PROTOCOL));
 				goto bail_nuke_ah;
 			}
 		}
@@ -539,9 +399,15 @@ upgrade_ws:
 		}
 
 		/* drop the header info -- no bail_nuke_ah after this */
-		lws_free_header_table(wsi);
 
-		lws_union_transition(wsi, LWS_CONNMODE_WS_SERVING);
+		if (wsi->u.hdr.ah)
+			free(wsi->u.hdr.ah);
+
+		wsi->mode = LWS_CONNMODE_WS_SERVING;
+
+		/* union transition */
+		memset(&wsi->u, 0, sizeof(wsi->u));
+		wsi->u.ws.rxflow_change_to = LWS_RXFLOW_ALLOW;
 
 		/*
 		 * create the frame buffer for this connection according to the
@@ -553,7 +419,7 @@ upgrade_ws:
 		if (!n)
 			n = LWS_MAX_SOCKET_IO_BUF;
 		n += LWS_SEND_BUFFER_PRE_PADDING + LWS_SEND_BUFFER_POST_PADDING;
-		wsi->u.ws.rx_user_buffer = lws_malloc(n);
+		wsi->u.ws.rx_user_buffer = malloc(n);
 		if (!wsi->u.ws.rx_user_buffer) {
 			lwsl_err("Out of Mem allocating rx buffer %d\n", n);
 			return 1;
@@ -573,7 +439,8 @@ upgrade_ws:
 
 bail_nuke_ah:
 	/* drop the header info */
-	lws_free_header_table(wsi);
+	if (wsi->u.hdr.ah)
+		free(wsi->u.hdr.ah);
 	return 1;
 }
 
@@ -582,14 +449,14 @@ libwebsocket_create_new_server_wsi(struct libwebsocket_context *context)
 {
 	struct libwebsocket *new_wsi;
 
-	new_wsi = lws_zalloc(sizeof(struct libwebsocket));
+	new_wsi = (struct libwebsocket *)malloc(sizeof(struct libwebsocket));
 	if (new_wsi == NULL) {
 		lwsl_err("Out of memory for new connection\n");
 		return NULL;
 	}
 
+	memset(new_wsi, 0, sizeof(struct libwebsocket));
 	new_wsi->pending_timeout = NO_PENDING_TIMEOUT;
-	new_wsi->rxflow_change_to = LWS_RXFLOW_ALLOW;
 
 	/* intialize the instance struct */
 
@@ -597,12 +464,8 @@ libwebsocket_create_new_server_wsi(struct libwebsocket_context *context)
 	new_wsi->mode = LWS_CONNMODE_HTTP_SERVING;
 	new_wsi->hdr_parsing_completed = 0;
 
-#ifdef LWS_OPENSSL_SUPPORT
-	new_wsi->use_ssl = LWS_SSL_ENABLED(context);
-#endif
-
 	if (lws_allocate_header_table(new_wsi)) {
-		lws_free(new_wsi);
+		free(new_wsi);
 		return NULL;
 	}
 
@@ -626,32 +489,6 @@ libwebsocket_create_new_server_wsi(struct libwebsocket_context *context)
 	return new_wsi;
 }
 
-/**
- * lws_http_transaction_completed() - wait for new http transaction or close
- * @wsi:	websocket connection
- *
- *	Returns 1 if the HTTP connection must close now
- *	Returns 0 and resets connection to wait for new HTTP header /
- *	  transaction if possible
- */
-
-LWS_VISIBLE
-int lws_http_transaction_completed(struct libwebsocket *wsi)
-{
-	/* if we can't go back to accept new headers, drop the connection */
-	if (wsi->u.http.connection_type != HTTP_CONNECTION_KEEP_ALIVE) {
-		lwsl_info("%s: close connection\n", __func__);
-		return 1;
-	}
-
-	/* otherwise set ourselves up ready to go again */
-	wsi->state = WSI_STATE_HTTP;
-	
-	lwsl_info("%s: await new transaction\n", __func__);
-	
-	return 0;
-}
-
 int lws_server_socket_service(struct libwebsocket_context *context,
 			struct libwebsocket *wsi, struct libwebsocket_pollfd *pollfd)
 {
@@ -666,13 +503,12 @@ int lws_server_socket_service(struct libwebsocket_context *context,
 
 	case LWS_CONNMODE_HTTP_SERVING:
 	case LWS_CONNMODE_HTTP_SERVING_ACCEPTED:
-	case LWS_CONNMODE_HTTP2_SERVING:
 
 		/* handle http headers coming in */
 
 		/* pending truncated sends have uber priority */
 
-		if (wsi->truncated_send_len) {
+		if (wsi->truncated_send_malloc) {
 			if (pollfd->revents & LWS_POLLOUT)
 				if (lws_issue_raw(wsi, wsi->truncated_send_malloc +
 					wsi->truncated_send_offset,
@@ -691,7 +527,7 @@ int lws_server_socket_service(struct libwebsocket_context *context,
 		/* any incoming data ready? */
 
 		if (pollfd->revents & LWS_POLLIN) {
-			len = lws_ssl_capable_read(context, wsi,
+			len = lws_ssl_capable_read(wsi,
 					context->service_buffer,
 						       sizeof(context->service_buffer));
 			switch (len) {
@@ -699,7 +535,7 @@ int lws_server_socket_service(struct libwebsocket_context *context,
 				lwsl_info("lws_server_skt_srv: read 0 len\n");
 				/* lwsl_info("   state=%d\n", wsi->state); */
 				if (!wsi->hdr_parsing_completed)
-					lws_free_header_table(wsi);
+					free(wsi->u.hdr.ah);
 				/* fallthru */
 			case LWS_SSL_CAPABLE_ERROR:
 				libwebsocket_close_and_free_session(
@@ -707,13 +543,14 @@ int lws_server_socket_service(struct libwebsocket_context *context,
 						LWS_CLOSE_STATUS_NOSTATUS);
 				return 0;
 			case LWS_SSL_CAPABLE_MORE_SERVICE:
-				goto try_pollout;
+				break;
 			}
 
 			/* just ignore incoming if waiting for close */
 			if (wsi->state != WSI_STATE_FLUSHING_STORED_SEND_BEFORE_CLOSE) {
 			
 				/* hm this may want to send (via HTTP callback for example) */
+
 				n = libwebsocket_read(context, wsi,
 							context->service_buffer, len);
 				if (n < 0)
@@ -725,7 +562,6 @@ int lws_server_socket_service(struct libwebsocket_context *context,
 			}
 		}
 
-try_pollout:
 		/* this handles POLLOUT for http serving fragments */
 
 		if (!(pollfd->revents & LWS_POLLOUT))
@@ -746,14 +582,15 @@ try_pollout:
 					NULL,
 					0);
 			if (n < 0)
-				goto fail;
+				libwebsocket_close_and_free_session(
+				       context, wsi, LWS_CLOSE_STATUS_NOSTATUS);
 			break;
 		}
 
-		/* >0 == completion, <0 == error */
-		n = libwebsockets_serve_http_file_fragment(context, wsi);
-		if (n < 0 || (n > 0 && lws_http_transaction_completed(wsi)))
-			goto fail;
+		/* nonzero for completion or error */
+		if (libwebsockets_serve_http_file_fragment(context, wsi))
+			libwebsocket_close_and_free_session(context, wsi,
+					       LWS_CLOSE_STATUS_NOSTATUS);
 		break;
 
 	case LWS_CONNMODE_SERVER_LISTENER:
@@ -833,8 +670,7 @@ try_pollout:
 		break;
 	}
 
-	if (lws_server_socket_service_ssl(context, &wsi, new_wsi,
-							  accept_fd, pollfd))
+	if (lws_server_socket_service_ssl(context, &wsi, new_wsi, accept_fd, pollfd))
 		goto fail;
 
 	return 0;
@@ -845,105 +681,6 @@ fail:
 	return 1;
 }
 
-#include "lextable-strings.h"
-
-const unsigned char *lws_token_to_string(enum lws_token_indexes token)
-{
-	if ((unsigned int)token >= ARRAY_SIZE(set))
-		return NULL;
-	
-	return (unsigned char *)set[token];
-}
-
-int lws_add_http_header_by_name(struct libwebsocket_context *context,
-			    struct libwebsocket *wsi,
-			    const unsigned char *name,
-			    const unsigned char *value,
-			    int length,
-			    unsigned char **p,
-			    unsigned char *end)
-{
-#ifdef LWS_USE_HTTP2
-	if (wsi->mode == LWS_CONNMODE_HTTP2_SERVING)
-		return lws_add_http2_header_by_name(context, wsi, name, value, length, p, end);
-#endif
-	if (name) {
-		while (*p < end && *name)
-			*((*p)++) = *name++;
-	
-		if (*p == end)
-			return 1;
-	
-		*((*p)++) = ' ';
-	}
-	if (*p + length + 3 >= end)
-		return 1;
-
-	memcpy(*p, value, length);
-	*p += length;
-	
-	*((*p)++) = '\x0d';
-	*((*p)++) = '\x0a';
-		
-	return 0;
-}
-
-int lws_finalize_http_header(struct libwebsocket_context *context,
-			    struct libwebsocket *wsi,
-			    unsigned char **p,
-			    unsigned char *end)
-{
-#ifdef LWS_USE_HTTP2
-	if (wsi->mode == LWS_CONNMODE_HTTP2_SERVING)
-		return 0;
-#endif
-	
-	if ((long)(end - *p) < 3)
-		return 1;
-	
-	*((*p)++) = '\x0d';
-	*((*p)++) = '\x0a';
-		
-	return 0;
-}
-
-int lws_add_http_header_by_token(struct libwebsocket_context *context,
-			    struct libwebsocket *wsi,
-			    enum lws_token_indexes token,
-			    const unsigned char *value,
-			    int length,
-			    unsigned char **p,
-			    unsigned char *end)
-{
-	const unsigned char *name;
-#ifdef LWS_USE_HTTP2
-	if (wsi->mode == LWS_CONNMODE_HTTP2_SERVING)
-		return lws_add_http2_header_by_token(context, wsi, token, value, length, p, end);
-#endif
-	name = lws_token_to_string(token);
-	if (!name)
-		return 1;
-	
-	return lws_add_http_header_by_name(context, wsi, name, value, length, p, end);
-}
-
-int lws_add_http_header_content_length(struct libwebsocket_context *context,
-			    struct libwebsocket *wsi,
-			    unsigned long content_length,
-			    unsigned char **p,
-			    unsigned char *end)
-{
-	char b[24];
-	int n;
-
-	n = sprintf(b, "%lu", content_length);
-	if (lws_add_http_header_by_token(context, wsi, WSI_TOKEN_HTTP_CONTENT_LENGTH, (unsigned char *)b, n, p, end))
-		return 1;
-	wsi->u.http.content_length = content_length;
-	wsi->u.http.content_remain = content_length;
-
-	return 0;
-}
 
 static const char *err400[] = {
 	"Bad Request",
@@ -975,36 +712,12 @@ static const char *err500[] = {
 	"HTTP Version Not Supported"
 };
 
-int lws_add_http_header_status(struct libwebsocket_context *context,
-			    struct libwebsocket *wsi,
-			    unsigned int code,
-			    unsigned char **p,
-			    unsigned char *end)
-{
-	unsigned char code_and_desc[60];
-	const char *description = "";
-	int n;
-
-#ifdef LWS_USE_HTTP2
-	if (wsi->mode == LWS_CONNMODE_HTTP2_SERVING)
-		return lws_add_http2_header_status(context, wsi, code, p, end);
-#endif
-	if (code >= 400 && code < (400 + ARRAY_SIZE(err400)))
-		description = err400[code - 400];
-	if (code >= 500 && code < (500 + ARRAY_SIZE(err500)))
-		description = err500[code - 500];
-
-	n = sprintf((char *)code_and_desc, "HTTP/1.0 %u %s", code, description);
-	
-	return lws_add_http_header_by_name(context, wsi, NULL, code_and_desc, n, p, end);
-}
-
 /**
  * libwebsockets_return_http_status() - Return simple http status
  * @context:		libwebsockets context
  * @wsi:		Websocket instance (available from user callback)
  * @code:		Status index, eg, 404
- * @html_body:		User-readable HTML description < 1KB, or NULL
+ * @html_body:		User-readable HTML description, or NULL
  *
  *	Helper to report HTTP errors back to the client cleanly and
  *	consistently
@@ -1014,32 +727,28 @@ LWS_VISIBLE int libwebsockets_return_http_status(
 				       unsigned int code, const char *html_body)
 {
 	int n, m;
-
-	unsigned char *p = context->service_buffer + LWS_SEND_BUFFER_PRE_PADDING;
-	unsigned char *start = p;
-	unsigned char *end = p + sizeof(context->service_buffer) -
-					LWS_SEND_BUFFER_PRE_PADDING;
+	const char *description = "";
 
 	if (!html_body)
 		html_body = "";
 
-	if (lws_add_http_header_status(context, wsi, code, &p, end))
-		return 1;
-	if (lws_add_http_header_by_token(context, wsi, WSI_TOKEN_HTTP_SERVER, (unsigned char *)"libwebsockets", 13, &p, end))
-		return 1;
-	if (lws_add_http_header_by_token(context, wsi, WSI_TOKEN_HTTP_CONTENT_TYPE, (unsigned char *)"text/html", 9, &p, end))
-		return 1;
-	if (lws_finalize_http_header(context, wsi, &p, end))
-		return 1;
+	if (code >= 400 && code < (400 + ARRAY_SIZE(err400)))
+		description = err400[code - 400];
+	if (code >= 500 && code < (500 + ARRAY_SIZE(err500)))
+		description = err500[code - 500];
 
-	m = libwebsocket_write(wsi, start, p - start, LWS_WRITE_HTTP_HEADERS);
-	if (m != (int)(p - start))
-		return 1;
+	n = sprintf((char *)context->service_buffer,
+		"HTTP/1.0 %u %s\x0d\x0a"
+		"Server: libwebsockets\x0d\x0a"
+		"Content-Type: text/html\x0d\x0a\x0d\x0a"
+		"<h1>%u %s</h1>%s",
+		code, description, code, description, html_body);
 
-	n = sprintf((char *)start, "<html><body><h1>%u</h1>%s</body></html>", code, html_body);
-	m = libwebsocket_write(wsi, start, n, LWS_WRITE_HTTP);
+	lwsl_info((const char *)context->service_buffer);
 
-	return m != n;
+	m = libwebsocket_write(wsi, context->service_buffer, n, LWS_WRITE_HTTP);
+
+	return m;
 }
 
 /**
@@ -1055,8 +764,7 @@ LWS_VISIBLE int libwebsockets_return_http_status(
  *	local files down the http link in a single step.
  *
  *	Returning <0 indicates error and the wsi should be closed.  Returning
- *	>0 indicates the file was completely sent and
- *	lws_http_transaction_completed() called on the wsi (and close if != 0)
+ *	>0 indicates the file was completely sent and the wsi should be closed.
  *	==0 indicates the file transfer is started and needs more service later,
  *	the wsi should be left alone.
  */
@@ -1064,14 +772,11 @@ LWS_VISIBLE int libwebsockets_return_http_status(
 LWS_VISIBLE int libwebsockets_serve_http_file(
 		struct libwebsocket_context *context,
 			struct libwebsocket *wsi, const char *file,
-			   const char *content_type, const char *other_headers,
-			   int other_headers_len)
+			   const char *content_type, const char *other_headers)
 {
-	unsigned char *response = context->service_buffer + LWS_SEND_BUFFER_PRE_PADDING;
-	unsigned char *p = response;
-	unsigned char *end = p + sizeof(context->service_buffer) -
-					LWS_SEND_BUFFER_PRE_PADDING;
+	unsigned char *p = context->service_buffer;
 	int ret = 0;
+	int n;
 
 	wsi->u.http.fd = lws_plat_open_file(file, &wsi->u.http.filelen);
 
@@ -1082,29 +787,21 @@ LWS_VISIBLE int libwebsockets_serve_http_file(
 		return -1;
 	}
 
-	if (lws_add_http_header_status(context, wsi, 200, &p, end))
-		return -1;
-	if (lws_add_http_header_by_token(context, wsi, WSI_TOKEN_HTTP_SERVER, (unsigned char *)"libwebsockets", 13, &p, end))
-		return -1;
-	if (lws_add_http_header_by_token(context, wsi, WSI_TOKEN_HTTP_CONTENT_TYPE, (unsigned char *)content_type, strlen(content_type), &p, end))
-		return -1;
-	if (lws_add_http_header_content_length(context, wsi, wsi->u.http.filelen, &p, end))
-		return -1;
-
+	p += sprintf((char *)p,
+"HTTP/1.0 200 OK\x0d\x0aServer: libwebsockets\x0d\x0a""Content-Type: %s\x0d\x0a",
+								  content_type);
 	if (other_headers) {
-		if ((end - p) < other_headers_len)
-			return -1;
-		memcpy(p, other_headers, other_headers_len);
-		p += other_headers_len;
+		n = strlen(other_headers);
+		memcpy(p, other_headers, n);
+		p += n;
 	}
+	p += sprintf((char *)p,
+		"Content-Length: %lu\x0d\x0a\x0d\x0a", wsi->u.http.filelen);
 
-	if (lws_finalize_http_header(context, wsi, &p, end))
-		return -1;
-	
-	ret = libwebsocket_write(wsi, response,
-				   p - response, LWS_WRITE_HTTP_HEADERS);
-	if (ret != (p - response)) {
-		lwsl_err("_write returned %d from %d\n", ret, (p - response));
+	ret = libwebsocket_write(wsi, context->service_buffer,
+				   p - context->service_buffer, LWS_WRITE_HTTP);
+	if (ret != (p - context->service_buffer)) {
+		lwsl_err("_write returned %d from %d\n", ret, (p - context->service_buffer));
 		return -1;
 	}
 
@@ -1132,15 +829,28 @@ int libwebsocket_interpret_incoming_packet(struct libwebsocket *wsi,
 		/*
 		 * we were accepting input but now we stopped doing so
 		 */
-		if (!(wsi->rxflow_change_to & LWS_RXFLOW_ALLOW)) {
-			lws_rxflow_cache(wsi, buf, n, len);
+		if (!(wsi->u.ws.rxflow_change_to & LWS_RXFLOW_ALLOW)) {
+			/* his RX is flowcontrolled, don't send remaining now */
+			if (!wsi->u.ws.rxflow_buffer) {
+				/* a new rxflow, buffer it and warn caller */
+				lwsl_info("new rxflow input buffer len %d\n",
+								       len - n);
+				wsi->u.ws.rxflow_buffer =
+					       (unsigned char *)malloc(len - n);
+				wsi->u.ws.rxflow_len = len - n;
+				wsi->u.ws.rxflow_pos = 0;
+				memcpy(wsi->u.ws.rxflow_buffer,
+							buf + n, len - n);
+			} else
+				/* rxflow while we were spilling prev rxflow */
+				lwsl_info("stalling in existing rxflow buf\n");
 
 			return 1;
 		}
 
 		/* account for what we're using in rxflow buffer */
-		if (wsi->rxflow_buffer)
-			wsi->rxflow_pos++;
+		if (wsi->u.ws.rxflow_buffer)
+			wsi->u.ws.rxflow_pos++;
 
 		/* process the byte */
 		m = libwebsocket_rx_sm(wsi, buf[n++]);

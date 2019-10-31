@@ -309,18 +309,15 @@ int lws_client_socket_service(struct libwebsocket_context *context,
 			lws_latency(context, wsi,
 				"SSL_get_verify_result LWS_CONNMODE..HANDSHAKE",
 								      n, n > 0);
+			if ((n != X509_V_OK) && (
+				n != X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT ||
+							   wsi->use_ssl != 2)) {
 
-			if (n != X509_V_OK) {
-				if ((n == X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT ||
-				     n == X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN) && wsi->use_ssl == 2) {
-					lwsl_notice("accepting self-signed certificate\n");
-				} else {
-					lwsl_err("server's cert didn't look good, X509_V_ERR = %d: %s\n",
-						 n, ERR_error_string(n, (char *)context->service_buffer));
-					libwebsocket_close_and_free_session(context,
-							wsi, LWS_CLOSE_STATUS_NOSTATUS);
-					return 0;
-				}
+				lwsl_err(
+				      "server's cert didn't look good %d\n", n);
+				libwebsocket_close_and_free_session(context,
+						wsi, LWS_CLOSE_STATUS_NOSTATUS);
+				return 0;
 			}
 #endif /* USE_CYASSL */
 		} else
@@ -405,7 +402,7 @@ int lws_client_socket_service(struct libwebsocket_context *context,
 		len = 1;
 		while (wsi->u.hdr.parser_state != WSI_PARSING_COMPLETE &&
 								      len > 0) {
-			n = lws_ssl_capable_read(context, wsi, &c, 1);
+			n = lws_ssl_capable_read(wsi, &c, 1);
 			lws_latency(context, wsi, "send lws_issue_raw", n, n == 1);
 			switch (n) {
 			case LWS_SSL_CAPABLE_ERROR:
@@ -560,15 +557,15 @@ lws_client_interpret_server_handshake(struct libwebsocket_context *context,
 	p = lws_hdr_simple_ptr(wsi, WSI_TOKEN_PROTOCOL);
 	len = strlen(p);
 
-	while (pc && *pc && !okay) {
+	while (*pc && !okay) {
 		if (!strncmp(pc, p, len) &&
-		    (pc[len] == ',' || pc[len] == '\0')) {
+					  (pc[len] == ',' || pc[len] == '\0')) {
 			okay = 1;
 			continue;
 		}
-		while (*pc && *pc++ != ',')
-			;
-		while (*pc && *pc == ' ')
+		while (*pc && *pc != ',')
+			pc++;
+		while (*pc && *pc != ' ')
 			pc++;
 	}
 
@@ -656,12 +653,15 @@ check_extensions:
 
 			wsi->active_extensions_user[
 				wsi->count_active_extensions] =
-					 lws_zalloc(ext->per_session_data_size);
+					 malloc(ext->per_session_data_size);
 			if (wsi->active_extensions_user[
 				wsi->count_active_extensions] == NULL) {
 				lwsl_err("Out of mem\n");
 				goto bail2;
 			}
+			memset(wsi->active_extensions_user[
+				wsi->count_active_extensions], 0,
+						    ext->per_session_data_size);
 			wsi->active_extensions[
 				  wsi->count_active_extensions] = ext;
 
@@ -721,13 +721,19 @@ check_accept:
 	libwebsocket_set_timeout(wsi, NO_PENDING_TIMEOUT, 0);
 
 	/* free up his parsing allocations */
+	if (wsi->u.hdr.ah)
+		free(wsi->u.hdr.ah);
 
-	lws_free(wsi->u.hdr.ah);
+	/* mark him as being alive */
 
-	lws_union_transition(wsi, LWS_CONNMODE_WS_CLIENT);
 	wsi->state = WSI_STATE_ESTABLISHED;
+	wsi->mode = LWS_CONNMODE_WS_CLIENT;
 
-	wsi->rxflow_change_to = LWS_RXFLOW_ALLOW;
+	/* union transition */
+
+	memset(&wsi->u, 0, sizeof(wsi->u));
+
+	wsi->u.ws.rxflow_change_to = LWS_RXFLOW_ALLOW;
 
 	/*
 	 * create the frame buffer for this connection according to the
@@ -739,7 +745,7 @@ check_accept:
 	if (!n)
 		n = LWS_MAX_SOCKET_IO_BUF;
 	n += LWS_SEND_BUFFER_PRE_PADDING + LWS_SEND_BUFFER_POST_PADDING;
-	wsi->u.ws.rx_user_buffer = lws_malloc(n);
+	wsi->u.ws.rx_user_buffer = malloc(n);
 	if (!wsi->u.ws.rx_user_buffer) {
 		lwsl_err("Out of Mem allocating rx buffer %d\n", n);
 		goto bail2;
@@ -781,7 +787,8 @@ check_accept:
 	return 0;
 
 bail3:
-	lws_free2(wsi->u.ws.rx_user_buffer);
+	free(wsi->u.ws.rx_user_buffer);
+	wsi->u.ws.rx_user_buffer = NULL;
 	close_reason = LWS_CLOSE_STATUS_NOSTATUS;
 
 bail2:
@@ -794,7 +801,8 @@ bail2:
 
 	/* free up his parsing allocations */
 
-	lws_free2(wsi->u.hdr.ah);
+	if (wsi->u.hdr.ah)
+		free(wsi->u.hdr.ah);
 
 	libwebsocket_close_and_free_session(context, wsi, close_reason);
 
@@ -939,7 +947,7 @@ libwebsockets_generate_client_handshake(struct libwebsocket_context *context,
 	key_b64[39] = '\0'; /* enforce composed length below buf sizeof */
 	n = sprintf(buf, "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key_b64);
 
-	libwebsockets_SHA1((unsigned char *)buf, n, (unsigned char *)hash);
+	SHA1((unsigned char *)buf, n, (unsigned char *)hash);
 
 	lws_b64_encode_string(hash, 20,
 			wsi->u.hdr.ah->initial_handshake_hash_base64,

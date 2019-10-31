@@ -12,6 +12,7 @@ struct libwebsocket *libwebsocket_client_connect_2(
 #endif
 	struct sockaddr_in server_addr4;
 	struct sockaddr_in client_addr4;
+	struct hostent *server_hostent;
 
 	struct sockaddr *v;
 	int n;
@@ -96,32 +97,15 @@ struct libwebsocket *libwebsocket_client_connect_2(
 	} else
 #endif
 	{
-		struct addrinfo ai, *res;
-		void *p = NULL;
-
-		memset (&ai, 0, sizeof ai);
-		ai.ai_family = PF_UNSPEC;
-		ai.ai_socktype = SOCK_STREAM;
-		ai.ai_flags = AI_CANONNAME;
-
-		if (getaddrinfo(ads, NULL, &ai, &res))
+		server_hostent = gethostbyname(ads);
+		if (!server_hostent) {
+			lwsl_err("Unable to get host name from %s\n", ads);
 			goto oom4;
-
-		while (!p && res) {
-			switch (res->ai_family) {
-			case AF_INET:
-				p = &((struct sockaddr_in *)res->ai_addr)->sin_addr;
-				break;
-			}
-
-			res = res->ai_next;
 		}
-		
-		if (!p)
-			goto oom4;
 
 		server_addr4.sin_family = AF_INET;
-		server_addr4.sin_addr = *((struct in_addr *)p);
+		server_addr4.sin_addr =
+				*((struct in_addr *)server_hostent->h_addr);
 		bzero(&server_addr4.sin_zero, 8);
 	}
 
@@ -278,8 +262,8 @@ struct libwebsocket *libwebsocket_client_connect_2(
 	return wsi;
 
 oom4:
-	lws_free(wsi->u.hdr.ah);
-	lws_free(wsi);
+	free(wsi->u.hdr.ah);
+	free(wsi);
 	return NULL;
 
 failed:
@@ -300,8 +284,7 @@ failed:
  * @origin:	Socket origin name
  * @protocol:	Comma-separated list of protocols being asked for from
  *		the server, or just one.  The server will pick the one it
- *		likes best.  If you don't want to specify a protocol, which is
- *		legal, use NULL here.
+ *		likes best.
  * @ietf_version_or_minus_one: -1 to ask to connect using the default, latest
  *		protocol supported, or the specific protocol ordinal
  *
@@ -321,10 +304,11 @@ libwebsocket_client_connect(struct libwebsocket_context *context,
 {
 	struct libwebsocket *wsi;
 
-	wsi = lws_zalloc(sizeof(struct libwebsocket));
+	wsi = (struct libwebsocket *) malloc(sizeof(struct libwebsocket));
 	if (wsi == NULL)
 		goto bail;
 
+	memset(wsi, 0, sizeof(*wsi));
 	wsi->sock = -1;
 
 	/* -1 means just use latest supported */
@@ -405,9 +389,9 @@ libwebsocket_client_connect(struct libwebsocket_context *context,
        return libwebsocket_client_connect_2(context, wsi);
 
 bail1:
-	lws_free(wsi->u.hdr.ah);
+	free(wsi->u.hdr.ah);
 bail:
-	lws_free(wsi);
+	free(wsi);
 
 	return NULL;
 }

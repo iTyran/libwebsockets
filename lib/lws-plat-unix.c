@@ -1,8 +1,5 @@
 #include "private-libwebsockets.h"
 
-#include <pwd.h>
-#include <grp.h>
-
 /*
  * included from libwebsockets.c for unix builds
  */
@@ -11,7 +8,7 @@ unsigned long long time_in_microseconds(void)
 {
 	struct timeval tv;
 	gettimeofday(&tv, NULL);
-	return ((unsigned long long)tv.tv_sec * 1000000LL) + tv.tv_usec;
+	return (tv.tv_sec * 1000000) + tv.tv_usec;
 }
 
 LWS_VISIBLE int libwebsockets_get_random(struct libwebsocket_context *context,
@@ -100,9 +97,6 @@ lws_plat_service(struct libwebsocket_context *context, int timeout_ms)
 	int n;
 	int m;
 	char buf;
-#ifdef LWS_OPENSSL_SUPPORT
-	struct libwebsocket *wsi, *wsi_next;
-#endif
 
 	/* stay dead once we are dead */
 
@@ -114,19 +108,10 @@ lws_plat_service(struct libwebsocket_context *context, int timeout_ms)
 	context->service_tid = context->protocols[0].callback(context, NULL,
 				     LWS_CALLBACK_GET_THREAD_ID, NULL, NULL, 0);
 
-#ifdef LWS_OPENSSL_SUPPORT
-	/* if we know we have non-network pending data, do not wait in poll */
-	if (lws_ssl_anybody_has_buffered_read(context))
-		timeout_ms = 0;
-#endif
 	n = poll(context->fds, context->fds_count, timeout_ms);
 	context->service_tid = 0;
 
-#ifdef LWS_OPENSSL_SUPPORT
-	if (!lws_ssl_anybody_has_buffered_read(context) && n == 0) {
-#else
 	if (n == 0) /* poll timeout */ {
-#endif
 		libwebsocket_service_fd(context, NULL);
 		return 0;
 	}
@@ -137,36 +122,9 @@ lws_plat_service(struct libwebsocket_context *context, int timeout_ms)
 		return 0;
 	}
 
-#ifdef LWS_OPENSSL_SUPPORT
-	/*
-	 * For all guys with buffered SSL read data already saved up, if they
-	 * are not flowcontrolled, fake their POLLIN status so they'll get
-	 * service to use up the buffered incoming data, even though their
-	 * network socket may have nothing
-	 */
-
-	wsi = context->pending_read_list;
-	while (wsi) {
-		wsi_next = wsi->pending_read_list_next;
-		context->fds[wsi->sock].revents |=
-				context->fds[wsi->sock].events & POLLIN;
-		if (context->fds[wsi->sock].revents & POLLIN) {
-			/*
-			 * he's going to get serviced now, take him off the
-			 * list of guys with buffered SSL.  If he still has some
-			 * at the end of the service, he'll get put back on the
-			 * list then.
-			 */
-			lws_ssl_remove_wsi_from_buffered_list(context, wsi);
-		}
-		wsi = wsi_next;
-	}
-#endif
-
 	/* any socket with events to service? */
 
 	for (n = 0; n < context->fds_count; n++) {
-
 		if (!context->fds[n].revents)
 			continue;
 
@@ -215,17 +173,17 @@ lws_plat_set_socket_options(struct libwebsocket_context *context, int fd)
 #else
 		/* set the keepalive conditions we want on it too */
 		optval = context->ka_time;
-		if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,
+		if (setsockopt(fd, IPPROTO_IP, TCP_KEEPIDLE,
 					     (const void *)&optval, optlen) < 0)
 			return 1;
 
 		optval = context->ka_interval;
-		if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL,
+		if (setsockopt(fd, IPPROTO_IP, TCP_KEEPINTVL,
 					     (const void *)&optval, optlen) < 0)
 			return 1;
 
 		optval = context->ka_probes;
-		if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,
+		if (setsockopt(fd, IPPROTO_IP, TCP_KEEPCNT,
 					     (const void *)&optval, optlen) < 0)
 			return 1;
 #endif
@@ -235,17 +193,14 @@ lws_plat_set_socket_options(struct libwebsocket_context *context, int fd)
 	optval = 1;
 #if !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(__NetBSD__) && \
     !defined(__OpenBSD__)
-	if (setsockopt(fd, SOL_TCP, TCP_NODELAY, (const void *)&optval, optlen) < 0)
-		return 1;
+	setsockopt(fd, SOL_TCP, TCP_NODELAY, (const void *)&optval, optlen);
 #else
 	tcp_proto = getprotobyname("TCP");
-	if (setsockopt(fd, tcp_proto->p_proto, TCP_NODELAY, &optval, optlen) < 0)
-		return 1;
+	setsockopt(fd, tcp_proto->p_proto, TCP_NODELAY, &optval, optlen);
 #endif
 
 	/* We are nonblocking... */
-	if (fcntl(fd, F_SETFL, O_NONBLOCK) < 0)
-		return 1;
+	fcntl(fd, F_SETFL, O_NONBLOCK);
 
 	return 0;
 }
@@ -253,22 +208,12 @@ lws_plat_set_socket_options(struct libwebsocket_context *context, int fd)
 LWS_VISIBLE void
 lws_plat_drop_app_privileges(struct lws_context_creation_info *info)
 {
-	if (info->uid != -1) {
-		struct passwd *p = getpwuid(info->uid);
-
-		if (p) {
-			initgroups(p->pw_name, info->gid);
-			if (setuid(info->uid))
-				lwsl_warn("setuid: %s\n", strerror(LWS_ERRNO));
-			else
-				lwsl_notice(" Set privs to user '%s'\n", p->pw_name);
-		} else
-			lwsl_warn("getpwuid: unable to find uid %d", info->uid);
-	}
 	if (info->gid != -1)
 		if (setgid(info->gid))
 			lwsl_warn("setgid: %s\n", strerror(LWS_ERRNO));
-
+	if (info->uid != -1)
+		if (setuid(info->uid))
+			lwsl_warn("setuid: %s\n", strerror(LWS_ERRNO));	
 }
 
 LWS_VISIBLE int
@@ -288,7 +233,7 @@ lws_plat_init_fd_tables(struct libwebsocket_context *context)
 	context->fds[0].events = LWS_POLLIN;
 	context->fds[0].revents = 0;
 	context->fds_count = 1;
-
+	
 	context->fd_random = open(SYSTEM_RANDOM_FILEPATH, O_RDONLY);
 	if (context->fd_random < 0) {
 		lwsl_err("Unable to open random device %s %d\n",
@@ -314,7 +259,7 @@ lws_plat_context_early_init(void)
 	sigaddset(&mask, SIGUSR2);
 
 	sigprocmask(SIG_BLOCK, &mask, NULL);
-
+	
 	signal(SIGPIPE, sigpipe_handler);
 
 	return 0;
@@ -377,6 +322,8 @@ interface_to_sa(struct libwebsocket_context *context,
 			break;
 #ifdef LWS_USE_IPV6
 		case AF_INET6:
+			if (rc >= 0)
+				break;
 			memcpy(&addr6->sin6_addr,
 			  &((struct sockaddr_in6 *)ifc->ifa_addr)->sin6_addr,
 						       sizeof(struct in6_addr));
@@ -389,7 +336,7 @@ interface_to_sa(struct libwebsocket_context *context,
 	}
 
 	freeifaddrs(ifr);
-
+	
 	if (rc == -1) {
 		/* check if bind to IP adddress */
 #ifdef LWS_USE_IPV6
@@ -443,16 +390,15 @@ lws_plat_open_file(const char* filename, unsigned long* filelen)
 	if (ret < 0)
 		return LWS_INVALID_FILE;
 
-	if (fstat(ret, &stat_buf) < 0) {
-		close(ret);
-		return LWS_INVALID_FILE;
-	}
+	fstat(ret, &stat_buf);
 	*filelen = stat_buf.st_size;
 	return ret;
 }
 
+#ifdef LWS_USE_IPV6
 LWS_VISIBLE const char *
 lws_plat_inet_ntop(int af, const void *src, char *dst, int cnt)
-{
+{ 
 	return inet_ntop(af, src, dst, cnt);
 }
+#endif

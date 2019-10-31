@@ -44,7 +44,6 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
-#include "private-libwebsockets.h"
 
 #ifdef HAVE_SYS_SOCKIO_H
 #include <sys/sockio.h>
@@ -86,7 +85,7 @@ getifaddrs2(struct ifaddrs **ifap,
 
 	buf_size = 8192;
 	for (;;) {
-		buf = lws_zalloc(buf_size);
+		buf = calloc(1, buf_size);
 		if (buf == NULL) {
 			ret = ENOMEM;
 			goto error_out;
@@ -108,7 +107,7 @@ getifaddrs2(struct ifaddrs **ifap,
 
 		if (ifconf.ifc_len < (int)buf_size)
 			break;
-		lws_free(buf);
+		free(buf);
 		buf_size *= 2;
 	}
 
@@ -138,12 +137,12 @@ getifaddrs2(struct ifaddrs **ifap,
 			goto error_out;
 		}
 
-		*end = lws_malloc(sizeof(**end));
+		*end = malloc(sizeof(**end));
 
 		(*end)->ifa_next = NULL;
 		(*end)->ifa_name = strdup(ifr->ifr_name);
 		(*end)->ifa_flags = ifreq.ifr_flags;
-		(*end)->ifa_addr = lws_malloc(salen);
+		(*end)->ifa_addr = malloc(salen);
 		memcpy((*end)->ifa_addr, sa, salen);
 		(*end)->ifa_netmask = NULL;
 
@@ -151,12 +150,11 @@ getifaddrs2(struct ifaddrs **ifap,
 		/* fix these when we actually need them */
 		if (ifreq.ifr_flags & IFF_BROADCAST) {
 			(*end)->ifa_broadaddr =
-				lws_malloc(sizeof(ifr->ifr_broadaddr));
+				malloc(sizeof(ifr->ifr_broadaddr));
 			memcpy((*end)->ifa_broadaddr, &ifr->ifr_broadaddr,
 						    sizeof(ifr->ifr_broadaddr));
 		} else if (ifreq.ifr_flags & IFF_POINTOPOINT) {
-			(*end)->ifa_dstaddr =
-				lws_malloc(sizeof(ifr->ifr_dstaddr));
+			(*end)->ifa_dstaddr = malloc(sizeof(ifr->ifr_dstaddr));
 			memcpy((*end)->ifa_dstaddr, &ifr->ifr_dstaddr,
 						      sizeof(ifr->ifr_dstaddr));
 		} else
@@ -171,12 +169,12 @@ getifaddrs2(struct ifaddrs **ifap,
 	}
 	*ifap = start;
 	close(fd);
-	lws_free(buf);
+	free(buf);
 	return 0;
 
 error_out:
 	close(fd);
-	lws_free(buf);
+	free(buf);
 	errno = ret;
 
 	return -1;
@@ -211,14 +209,18 @@ freeifaddrs(struct ifaddrs *ifp)
 	struct ifaddrs *p, *q;
 
 	for (p = ifp; p; ) {
-		lws_free(p->ifa_name);
-		lws_free(p->ifa_addr);
-		lws_free(p->ifa_dstaddr);
-		lws_free(p->ifa_netmask);
-		lws_free(p->ifa_data);
+		free(p->ifa_name);
+		if (p->ifa_addr)
+			free(p->ifa_addr);
+		if (p->ifa_dstaddr)
+			free(p->ifa_dstaddr);
+		if (p->ifa_netmask)
+			free(p->ifa_netmask);
+		if (p->ifa_data)
+			free(p->ifa_data);
 		q = p;
 		p = p->ifa_next;
-		lws_free(q);
+		free(q);
 	}
 }
 

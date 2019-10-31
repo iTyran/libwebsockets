@@ -124,12 +124,15 @@ lws_extension_server_handshake(struct libwebsocket_context *context,
 
 			wsi->active_extensions_user[
 				wsi->count_active_extensions] =
-				     lws_zalloc(ext->per_session_data_size);
+				     malloc(ext->per_session_data_size);
 			if (wsi->active_extensions_user[
 			     wsi->count_active_extensions] == NULL) {
 				lwsl_err("Out of mem\n");
 				return 1;
 			}
+			memset(wsi->active_extensions_user[
+				wsi->count_active_extensions], 0,
+					    ext->per_session_data_size);
 
 			wsi->active_extensions[
 				  wsi->count_active_extensions] = ext;
@@ -151,7 +154,7 @@ lws_extension_server_handshake(struct libwebsocket_context *context,
 
 		n = 0;
 	}
-
+	
 	return 0;
 }
 #endif
@@ -185,7 +188,7 @@ handshake_0405(struct libwebsocket_context *context, struct libwebsocket *wsi)
 				"%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11",
 				lws_hdr_simple_ptr(wsi, WSI_TOKEN_KEY));
 
-	libwebsockets_SHA1(context->service_buffer, n, hash);
+	SHA1(context->service_buffer, n, hash);
 
 	accept_len = lws_b64_encode_string((char *)hash, 20,
 			(char *)context->service_buffer,
@@ -203,7 +206,7 @@ handshake_0405(struct libwebsocket_context *context, struct libwebsocket *wsi)
 
 	/* make a buffer big enough for everything */
 
-	response = (char *)context->service_buffer + MAX_WEBSOCKET_04_KEY_LEN + LWS_SEND_BUFFER_PRE_PADDING;
+	response = (char *)context->service_buffer + MAX_WEBSOCKET_04_KEY_LEN;
 	p = response;
 	LWS_CPYAPP(p, "HTTP/1.1 101 Switching Protocols\x0d\x0a"
 		      "Upgrade: WebSocket\x0d\x0a"
@@ -228,9 +231,6 @@ handshake_0405(struct libwebsocket_context *context, struct libwebsocket *wsi)
 	if (lws_extension_server_handshake(context, wsi, &p))
 		goto bail;
 #endif
-
-	//LWS_CPYAPP(p, "\x0d\x0a""An-unknown-header: blah");
-
 	/* end of response packet */
 
 	LWS_CPYAPP(p, "\x0d\x0a\x0d\x0a");
@@ -246,7 +246,7 @@ handshake_0405(struct libwebsocket_context *context, struct libwebsocket *wsi)
 		fwrite(response, 1,  p - response, stderr);
 #endif
 		n = libwebsocket_write(wsi, (unsigned char *)response,
-						  p - response, LWS_WRITE_HTTP_HEADERS);
+						  p - response, LWS_WRITE_HTTP);
 		if (n != (p - response)) {
 			lwsl_debug("handshake_0405: ERROR writing to socket\n");
 			goto bail;
@@ -271,7 +271,10 @@ handshake_0405(struct libwebsocket_context *context, struct libwebsocket *wsi)
 
 bail:
 	/* free up his parsing allocations */
-	lws_free_header_table(wsi);
+
+	if (wsi->u.hdr.ah)
+		free(wsi->u.hdr.ah);
+
 	return -1;
 }
 
